@@ -190,9 +190,133 @@
 
       .vr-stats { margin-top: 12px; }
       .vr-stats .cam-fps { color: #b388ff; }
+
+      .template-selector {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        max-width: 640px;
+        width: 100%;
+      }
+      .template-selector-title {
+        font-size: 20px;
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        color: #888;
+      }
+      .template-card {
+        background: #1a1a2e;
+        border: 1px solid rgba(0, 229, 255, 0.15);
+        border-radius: 12px;
+        padding: 20px 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .template-card-name {
+        font-size: 20px;
+        font-weight: bold;
+        color: #00e5ff;
+      }
+      .template-card-desc {
+        font-size: 14px;
+        color: #888;
+      }
+      .template-card-tasks {
+        font-size: 13px;
+        color: #aaa;
+        padding-left: 12px;
+      }
+      .template-card-tasks li { margin: 2px 0; }
+      .template-select-btn {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-size: 16px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        padding: 10px 28px;
+        border-radius: 8px;
+        cursor: pointer;
+        align-self: flex-start;
+        background: rgba(0, 229, 255, 0.08);
+        color: #00e5ff;
+        border: 1px solid rgba(0, 229, 255, 0.3);
+        transition: all 0.2s ease;
+      }
+      .template-select-btn:hover {
+        background: rgba(0, 229, 255, 0.18);
+        box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
+      }
+
+      .task-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        max-width: 640px;
+        width: 100%;
+      }
+      .task-btn {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-size: 13px;
+        padding: 8px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        background: #1a1a2e;
+        color: #aaa;
+        border: 1px solid rgba(255,255,255,0.1);
+        transition: all 0.15s ease;
+        text-align: left;
+      }
+      .task-btn:hover {
+        color: #e0e0e0;
+        border-color: rgba(0, 229, 255, 0.3);
+        background: rgba(0, 229, 255, 0.06);
+      }
+      .task-btn .task-category {
+        display: block;
+        font-size: 10px;
+        color: #555;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 2px;
+      }
     </style>
   </head>
   <body>
+    {% if not state.template_ready -%}
+    <div class="template-selector">
+      <div class="template-selector-title">Select task template</div>
+      {% for tmpl in task_templates -%}
+      <div class="template-card">
+        <div class="template-card-name">{{ tmpl.name }}</div>
+        <div class="template-card-desc">{{ tmpl.description }}</div>
+        <ul class="template-card-tasks">
+          {% for task_name in tmpl.task_names -%}
+          <li>{{ task_name }}</li>
+          {% endfor -%}
+          {% if tmpl.loop -%}<li style="color:#555">↩ loops</li>{% endif -%}
+        </ul>
+        <form action="{{ url_for("_select_template") }}" method="post">
+          <input type="hidden" name="template_id" value="{{ tmpl.id }}">
+          <input class="template-select-btn" type="submit" value="Select">
+        </form>
+      </div>
+      {% endfor -%}
+    </div>
+
+    <div class="template-selector-title" style="max-width:640px;width:100%">Individual tasks</div>
+    <div class="task-grid">
+      {% for t in all_tasks -%}
+      <form action="{{ url_for("_select_task") }}" method="post">
+        <input type="hidden" name="task_id" value="{{ t.id }}">
+        <button class="task-btn" type="submit">
+          <span class="task-category">{{ t.category }}</span>
+          {{ t.name }}
+        </button>
+      </form>
+      {% endfor -%}
+    </div>
+    {% else -%}
     <div class="top-row">
       <div class="episode">
         Episode: {{ state.episode_number }}
@@ -445,5 +569,6 @@
         row.classList.toggle("warn", isWarn);
       };
     </script>
+    {% endif -%}
   </body>
 </html>

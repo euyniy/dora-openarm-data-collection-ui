@@ -25,6 +25,7 @@ dependencies = [
   "dora-rs >= 0.3.9",
   "fastapi[standard]",
   "uvicorn",
+  "openarm-task-library",
 ]
 
 [project.urls]

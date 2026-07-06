@@ -22,7 +22,7 @@ import dataclasses
 import datetime
 import dora
 from collections.abc import AsyncIterable
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
@@ -32,14 +32,17 @@ import pyarrow as pa
 import time
 import uvicorn
 import yaml
+from openarm_task_library import LIBRARY
 
 base_dir = os.path.dirname(__file__)
-templates = Jinja2Templates(directory=f"{base_dir}/templates")
+jinja = Jinja2Templates(directory=f"{base_dir}/templates")
 
 node = None
 
 auto_open = False
 port = None
+
+tasks: list[dict] = []
 
 
 @asynccontextmanager
@@ -65,6 +68,7 @@ class State:
     task_title: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
+    template_ready: bool = False
 
 
 state = State()
@@ -230,11 +234,23 @@ def _command_arm_stop():
 @app.get("/", response_class=HTMLResponse)
 def _root(request: Request):
     """Render the main HTML."""
-    return templates.TemplateResponse(
-        request=request,
-        name="root.html",
-        context={"state": state, "state_version": state_version},
-    )
+    ctx: dict = {"state": state, "state_version": state_version}
+    if not state.template_ready:
+        ctx["task_templates"] = [
+            {
+                "id": t.id,
+                "name": t.name,
+                "description": t.description,
+                "task_names": [LIBRARY.get(tid).name for tid in t.task_ids],
+                "loop": t.loop,
+            }
+            for t in LIBRARY.all_templates()
+        ]
+        ctx["all_tasks"] = [
+            {"id": t.id, "name": t.name, "category": t.category}
+            for t in LIBRARY.all_tasks()
+        ]
+    return jinja.TemplateResponse(request=request, name="root.html", context=ctx)
 
 
 @app.post("/start")
@@ -343,6 +359,35 @@ def _arm_start(request: Request):
 def _arm_stop(request: Request):
     """Pause (stop) the arm(s)."""
     _command_arm_stop()
+    return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.post("/select-task")
+def _select_task(request: Request, task_id: str = Form(...)):
+    """Load a single task (loops on itself)."""
+    global tasks
+    task = LIBRARY.get(task_id)
+    role_values = {role.name: role.object_type for role in task.objects}
+    tasks = [{"prompt": task.instantiate(**role_values), "task_id": task_id}]
+    state.task_index = 0
+    state.task_title = tasks[0]["prompt"]
+    state.template_ready = True
+    return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.post("/select-template")
+def _select_template(request: Request, template_id: str = Form(...)):
+    """Load tasks from the task library for the chosen template."""
+    global tasks
+    template = LIBRARY.get_template(template_id)
+    tasks = []
+    for task_id in template.task_ids:
+        task = LIBRARY.get(task_id)
+        role_values = {role.name: role.object_type for role in task.objects}
+        tasks.append({"prompt": task.instantiate(**role_values), "task_id": task_id})
+    state.task_index = 0
+    state.task_title = tasks[0]["prompt"]
+    state.template_ready = True
     return RedirectResponse(request.url_for("_root"), 303)
 
 
@@ -457,9 +502,12 @@ def main():
     auto_open = args.auto_open
     global port
     port = args.port
-    metadata = load_yaml(args.metadata_file)
-    tasks = metadata["tasks"]
-    state.task_title = tasks[state.task_index]["prompt"]
+    if args.metadata_file:
+        metadata = load_yaml(args.metadata_file)
+        if "tasks" in metadata:
+            tasks = metadata["tasks"]
+            state.task_title = tasks[0]["prompt"]
+            state.template_ready = True
 
     node = dora.Node()
     asyncio.run(_main_async())
