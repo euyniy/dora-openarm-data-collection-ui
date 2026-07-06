@@ -192,10 +192,10 @@
       .vr-stats .cam-fps { color: #b388ff; }
 
       .template-selector {
-        display: flex;
-        flex-direction: column;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
         gap: 16px;
-        max-width: 640px;
+        max-width: 900px;
         width: 100%;
       }
       .template-selector-title {
@@ -249,7 +249,7 @@
       }
 
       .custom-section {
-        max-width: 640px;
+        max-width: 900px;
         width: 100%;
         display: flex;
         flex-direction: column;
@@ -378,8 +378,8 @@
   </head>
   <body>
     {% if not state.template_ready -%}
+    <div class="template-selector-title" style="max-width:900px;width:100%">Select task template</div>
     <div class="template-selector">
-      <div class="template-selector-title">Select task template</div>
       {% for tmpl in task_templates -%}
       <div class="template-card">
         <div class="template-card-name">{{ tmpl.name }}</div>
@@ -398,7 +398,7 @@
       {% endfor -%}
     </div>
 
-    <div class="template-selector-title" style="max-width:640px;width:100%">Custom sequence</div>
+    <div class="template-selector-title" style="max-width:900px;width:100%">Custom sequence</div>
     <div class="custom-section">
       <div class="filter-row">
         <span class="filter-label">Object</span>
