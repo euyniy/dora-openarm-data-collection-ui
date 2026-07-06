@@ -247,9 +247,16 @@ def _root(request: Request):
             for t in LIBRARY.all_templates()
         ]
         ctx["all_tasks"] = [
-            {"id": t.id, "name": t.name, "category": t.category}
+            {
+                "id": t.id,
+                "name": t.name,
+                "motion": t.motion,
+                "objects": sorted(t.objects),
+            }
             for t in LIBRARY.all_tasks()
         ]
+        ctx["all_objects"] = LIBRARY.all_objects()
+        ctx["all_motions"] = LIBRARY.all_motions()
     return jinja.TemplateResponse(request=request, name="root.html", context=ctx)
 
 
@@ -362,13 +369,15 @@ def _arm_stop(request: Request):
     return RedirectResponse(request.url_for("_root"), 303)
 
 
-@app.post("/select-task")
-def _select_task(request: Request, task_id: str = Form(...)):
-    """Load a single task (loops on itself)."""
+@app.post("/select-tasks")
+async def _select_tasks(request: Request):
+    """Build a custom task sequence from an ordered list of task_ids."""
     global tasks
-    task = LIBRARY.get(task_id)
-    role_values = {role.name: role.object_type for role in task.objects}
-    tasks = [{"prompt": task.instantiate(**role_values), "task_id": task_id}]
+    form = await request.form()
+    task_ids = form.getlist("task_id")
+    if not task_ids:
+        return RedirectResponse(request.url_for("_root"), 303)
+    tasks = [{"prompt": LIBRARY.get(tid).prompt, "task_id": tid} for tid in task_ids]
     state.task_index = 0
     state.task_title = tasks[0]["prompt"]
     state.template_ready = True
@@ -380,11 +389,10 @@ def _select_template(request: Request, template_id: str = Form(...)):
     """Load tasks from the task library for the chosen template."""
     global tasks
     template = LIBRARY.get_template(template_id)
-    tasks = []
-    for task_id in template.task_ids:
-        task = LIBRARY.get(task_id)
-        role_values = {role.name: role.object_type for role in task.objects}
-        tasks.append({"prompt": task.instantiate(**role_values), "task_id": task_id})
+    tasks = [
+        {"prompt": LIBRARY.get(tid).prompt, "task_id": tid}
+        for tid in template.task_ids
+    ]
     state.task_index = 0
     state.task_title = tasks[0]["prompt"]
     state.template_ready = True

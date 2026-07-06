@@ -248,38 +248,132 @@
         box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
       }
 
-      .task-grid {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
+      .custom-section {
         max-width: 640px;
         width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
       }
-      .task-btn {
+      .filter-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+      .filter-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: #555;
+        margin-right: 4px;
+      }
+      .chip {
         font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
-        font-size: 13px;
-        padding: 8px 16px;
-        border-radius: 8px;
+        font-size: 12px;
+        padding: 4px 12px;
+        border-radius: 999px;
         cursor: pointer;
         background: #1a1a2e;
-        color: #aaa;
-        border: 1px solid rgba(255,255,255,0.1);
+        color: #666;
+        border: 1px solid rgba(255,255,255,0.08);
         transition: all 0.15s ease;
-        text-align: left;
+        user-select: none;
       }
-      .task-btn:hover {
-        color: #e0e0e0;
-        border-color: rgba(0, 229, 255, 0.3);
-        background: rgba(0, 229, 255, 0.06);
+      .chip.active {
+        color: #00e5ff;
+        border-color: rgba(0, 229, 255, 0.5);
+        background: rgba(0, 229, 255, 0.08);
       }
-      .task-btn .task-category {
-        display: block;
+      .task-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .task-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        border-radius: 8px;
+        background: #1a1a2e;
+        border: 1px solid rgba(255,255,255,0.06);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        gap: 12px;
+      }
+      .task-item:hover { border-color: rgba(0,229,255,0.25); }
+      .task-item.selected {
+        border-color: rgba(0,229,255,0.45);
+        background: rgba(0,229,255,0.06);
+      }
+      .task-item-name { font-size: 14px; color: #ccc; flex: 1; }
+      .task-item.selected .task-item-name { color: #e0e0e0; }
+      .task-item-tags { display: flex; gap: 6px; flex-shrink: 0; }
+      .tag {
         font-size: 10px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        background: rgba(255,255,255,0.05);
         color: #555;
         text-transform: uppercase;
-        letter-spacing: 0.1em;
-        margin-bottom: 2px;
+        letter-spacing: 0.08em;
       }
+      .tag.motion { color: #b388ff; background: rgba(179,136,255,0.08); }
+      .selected-panel {
+        background: #111120;
+        border: 1px solid rgba(0,229,255,0.12);
+        border-radius: 10px;
+        padding: 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .selected-panel-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: #555;
+      }
+      .selected-items { display: flex; flex-direction: column; gap: 4px; min-height: 20px; }
+      .selected-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: #aaa;
+      }
+      .selected-item-num { color: #555; width: 16px; flex-shrink: 0; }
+      .selected-item-name { flex: 1; }
+      .selected-item-remove {
+        color: #444;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+        padding: 0 4px;
+      }
+      .selected-item-remove:hover { color: #ff3355; }
+      .selected-panel-empty { color: #333; font-size: 13px; font-style: italic; }
+      .run-btn {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-size: 15px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        padding: 10px 24px;
+        border-radius: 8px;
+        cursor: pointer;
+        background: rgba(0, 229, 255, 0.1);
+        color: #00e5ff;
+        border: 1px solid rgba(0, 229, 255, 0.35);
+        align-self: flex-start;
+        transition: all 0.2s ease;
+      }
+      .run-btn:hover:not(:disabled) {
+        background: rgba(0, 229, 255, 0.2);
+        box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
+      }
+      .run-btn:disabled { opacity: 0.3; cursor: default; }
     </style>
   </head>
   <body>
@@ -304,18 +398,121 @@
       {% endfor -%}
     </div>
 
-    <div class="template-selector-title" style="max-width:640px;width:100%">Individual tasks</div>
-    <div class="task-grid">
-      {% for t in all_tasks -%}
-      <form action="{{ url_for("_select_task") }}" method="post">
-        <input type="hidden" name="task_id" value="{{ t.id }}">
-        <button class="task-btn" type="submit">
-          <span class="task-category">{{ t.category }}</span>
-          {{ t.name }}
-        </button>
-      </form>
-      {% endfor -%}
+    <div class="template-selector-title" style="max-width:640px;width:100%">Custom sequence</div>
+    <div class="custom-section">
+      <div class="filter-row">
+        <span class="filter-label">Object</span>
+        {% for obj in all_objects -%}
+        <span class="chip" data-filter="object" data-value="{{ obj }}" onclick="toggleFilter(this)">{{ obj }}</span>
+        {% endfor -%}
+      </div>
+      <div class="filter-row">
+        <span class="filter-label">Motion</span>
+        {% for m in all_motions -%}
+        <span class="chip" data-filter="motion" data-value="{{ m }}" onclick="toggleFilter(this)">{{ m }}</span>
+        {% endfor -%}
+      </div>
+
+      <div class="task-list" id="task-list">
+        {% for t in all_tasks -%}
+        <div class="task-item"
+             id="task-{{ t.id }}"
+             data-id="{{ t.id }}"
+             data-name="{{ t.name }}"
+             data-objects="{{ t.objects | join(',') }}"
+             data-motion="{{ t.motion }}"
+             onclick="toggleTask('{{ t.id }}', '{{ t.name }}')">
+          <span class="task-item-name">{{ t.name }}</span>
+          <span class="task-item-tags">
+            <span class="tag motion">{{ t.motion }}</span>
+            {% for obj in t.objects -%}<span class="tag">{{ obj }}</span>{% endfor -%}
+          </span>
+        </div>
+        {% endfor -%}
+      </div>
+
+      <div class="selected-panel">
+        <div class="selected-panel-title">Selected <span id="sel-count">0</span></div>
+        <div class="selected-items" id="selected-items">
+          <span class="selected-panel-empty">Click tasks above to add them</span>
+        </div>
+        <form id="run-form" action="{{ url_for("_select_tasks") }}" method="post">
+          <button class="run-btn" id="run-btn" type="button" disabled onclick="submitSelection()">
+            Run ▶
+          </button>
+        </form>
+      </div>
     </div>
+    <script>
+      const selected = []; // [{id, name}] in selection order
+
+      function toggleFilter(chip) {
+        chip.classList.toggle('active');
+        applyFilters();
+      }
+
+      function applyFilters() {
+        const activeObjects = new Set(
+          [...document.querySelectorAll('.chip[data-filter="object"].active')].map(c => c.dataset.value)
+        );
+        const activeMotions = new Set(
+          [...document.querySelectorAll('.chip[data-filter="motion"].active')].map(c => c.dataset.value)
+        );
+        document.querySelectorAll('.task-item').forEach(item => {
+          const objs = new Set(item.dataset.objects.split(',').filter(Boolean));
+          const motion = item.dataset.motion;
+          const objOk = activeObjects.size === 0 || [...activeObjects].some(o => objs.has(o));
+          const motionOk = activeMotions.size === 0 || activeMotions.has(motion);
+          item.style.display = (objOk && motionOk) ? '' : 'none';
+        });
+      }
+
+      function toggleTask(id, name) {
+        const idx = selected.findIndex(t => t.id === id);
+        if (idx >= 0) {
+          selected.splice(idx, 1);
+          document.getElementById('task-' + id).classList.remove('selected');
+        } else {
+          selected.push({id, name});
+          document.getElementById('task-' + id).classList.add('selected');
+        }
+        renderSelected();
+      }
+
+      function removeSelected(idx) {
+        const {id} = selected.splice(idx, 1)[0];
+        document.getElementById('task-' + id).classList.remove('selected');
+        renderSelected();
+      }
+
+      function renderSelected() {
+        const el = document.getElementById('selected-items');
+        document.getElementById('sel-count').textContent = selected.length;
+        document.getElementById('run-btn').disabled = selected.length === 0;
+        if (selected.length === 0) {
+          el.innerHTML = '<span class="selected-panel-empty">Click tasks above to add them</span>';
+          return;
+        }
+        el.innerHTML = selected.map((t, i) =>
+          `<div class="selected-item">
+            <span class="selected-item-num">${i + 1}.</span>
+            <span class="selected-item-name">${t.name}</span>
+            <span class="selected-item-remove" onclick="removeSelected(${i})">×</span>
+          </div>`
+        ).join('');
+      }
+
+      function submitSelection() {
+        const form = document.getElementById('run-form');
+        form.querySelectorAll('input[name="task_id"]').forEach(e => e.remove());
+        for (const t of selected) {
+          const inp = document.createElement('input');
+          inp.type = 'hidden'; inp.name = 'task_id'; inp.value = t.id;
+          form.appendChild(inp);
+        }
+        form.submit();
+      }
+    </script>
     {% else -%}
     <div class="top-row">
       <div class="episode">
