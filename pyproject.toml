@@ -14,7 +14,7 @@
 
 [project]
 name = "dora-openarm-data-collection-ui"
-version = "1.0.0"
+version = "0.1.0"
 authors = [{ name = "Enactic, Inc." }]
 description = "dora-rs node that provides UI to control data collection with OpenArm"
 license = { text = "Apache-2.0" }
