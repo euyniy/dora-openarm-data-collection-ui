@@ -30,7 +30,7 @@ dependencies = [
 [project.urls]
 Changelog = "https://github.com/enactic/dora-openarm-data-collection-ui/releases"
 Issues = "https://github.com/enactic/dora-openarm-data-collection-ui/issues"
-Repository = "https://github.com/enactic/dora-openarm-data-collection-ui.git"
+Repository = "https://github.com/enactic/dora-openarm-data-collection-ui"
 
 [project.scripts]
 dora-openarm-data-collection-ui = "dora_openarm_data_collection_ui.main:main"
