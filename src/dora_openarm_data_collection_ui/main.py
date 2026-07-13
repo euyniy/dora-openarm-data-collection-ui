@@ -32,7 +32,7 @@ import pyarrow as pa
 import time
 import uvicorn
 import yaml
-from openarm_task_library import LIBRARY
+from openarm_task_library import build_library, load_custom_tasks
 
 base_dir = os.path.dirname(__file__)
 jinja = Jinja2Templates(directory=f"{base_dir}/templates")
@@ -43,6 +43,19 @@ auto_open = False
 port = None
 
 tasks: list[dict] = []
+
+DEFAULT_LANG = "en"
+
+CUSTOM_TASKS_EXTENSIONS = (".yaml", ".yml", ".py")
+
+# The active task library. Starts as the base catalog; swapped out wholesale by
+# _set_custom_tasks() when the operator picks a task pack from the dropdown, since
+# TaskLibrary has no "unregister" -- switching packs rebuilds from scratch rather
+# than accumulating stale entries.
+library = build_library()
+
+# Directory of selectable task-pack files, set from --custom-tasks-dir in main().
+custom_tasks_dir = pathlib.Path("custom_tasks")
 
 
 @asynccontextmanager
@@ -66,6 +79,8 @@ class State:
     episode_number: int = 0
     task_index: int = 0
     task_title: str = ""
+    lang: str = DEFAULT_LANG
+    custom_tasks_file: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
     template_ready: bool = False
@@ -178,12 +193,78 @@ async def _notify_state_changed() -> None:
         _state_changed.notify_all()
 
 
+def _available_langs() -> list[str]:
+    """Language codes offered in the UI: the default plus any task's translations."""
+    langs = {DEFAULT_LANG}
+    for t in library.all_tasks():
+        langs.update(t.translations.keys())
+    return sorted(langs)
+
+
+def _available_custom_task_files() -> list[str]:
+    """Filenames of selectable task packs in `custom_tasks_dir`, if it exists."""
+    if not custom_tasks_dir.is_dir():
+        return []
+    return sorted(
+        p.name for p in custom_tasks_dir.iterdir() if p.suffix in CUSTOM_TASKS_EXTENSIONS
+    )
+
+
+def _set_custom_tasks(file: str) -> None:
+    """Rebuild `library` from the base catalog plus `file` (or just the base if empty).
+
+    Resets task-selection state, since previously selected task ids may not
+    exist in the newly loaded pack.
+    """
+    global library, tasks
+    new_library = build_library()
+    if file:
+        # `file` must be a bare filename returned by _available_custom_task_files()
+        # (never attacker-controlled path segments like "../"), so this both
+        # validates the pack exists and rules out path traversal.
+        if file not in _available_custom_task_files():
+            raise ValueError(f"Unknown task pack: {file!r}")
+        load_custom_tasks(new_library, custom_tasks_dir / file)
+    library = new_library
+    state.custom_tasks_file = file
+    tasks = []
+    state.task_index = 0
+    state.task_title = ""
+    state.template_ready = False
+
+
+def _entry_prompt(entry: dict, lang: str) -> str:
+    """Resolve a task-runner entry's prompt for `lang`, falling back to its default prompt.
+
+    `entry` is either built from the task library (see `_task_entry`) or loaded
+    verbatim from a METADATA_FILE's `tasks:` list, which may optionally carry a
+    `translations: {lang: {prompt: ...}}` block of its own.
+    """
+    if lang != DEFAULT_LANG:
+        translation = entry.get("translations", {}).get(lang) or {}
+        if translation.get("prompt"):
+            return translation["prompt"]
+    return entry["prompt"]
+
+
+def _task_entry(task_id: str) -> dict:
+    """Build a task-runner entry (prompt + per-language overrides) from the library."""
+    task = library.get(task_id)
+    return {
+        "task_id": task_id,
+        "prompt": task.prompt,
+        "translations": {
+            lang: {"prompt": task.localized(lang).prompt} for lang in task.translations
+        },
+    }
+
+
 def next_task():
     """Update the state with the next task."""
     state.task_index += 1
     if state.task_index >= len(tasks):
         state.task_index = 0
-    state.task_title = tasks[state.task_index]["prompt"]
+    state.task_title = _entry_prompt(tasks[state.task_index], state.lang)
 
 
 def _command_start():
@@ -234,29 +315,36 @@ def _command_arm_stop():
 @app.get("/", response_class=HTMLResponse)
 def _root(request: Request):
     """Render the main HTML."""
-    ctx: dict = {"state": state, "state_version": state_version}
+    lang = state.lang
+    ctx: dict = {
+        "state": state,
+        "state_version": state_version,
+        "available_langs": _available_langs(),
+        "current_lang": lang,
+    }
     if not state.template_ready:
         ctx["task_templates"] = [
             {
                 "id": t.id,
                 "name": t.name,
                 "description": t.description,
-                "task_names": [LIBRARY.get(tid).name for tid in t.task_ids],
+                "task_names": [library.get(tid).localized(lang).name for tid in t.task_ids],
                 "loop": t.loop,
             }
-            for t in LIBRARY.all_templates()
+            for t in library.all_templates()
         ]
         ctx["all_tasks"] = [
             {
                 "id": t.id,
-                "name": t.name,
+                "name": t.localized(lang).name,
                 "motion": t.motion,
                 "objects": sorted(t.objects),
             }
-            for t in LIBRARY.all_tasks()
+            for t in library.all_tasks()
         ]
-        ctx["all_objects"] = LIBRARY.all_objects()
-        ctx["all_motions"] = LIBRARY.all_motions()
+        ctx["all_objects"] = library.all_objects()
+        ctx["all_motions"] = library.all_motions()
+        ctx["available_custom_task_files"] = _available_custom_task_files()
     return jinja.TemplateResponse(request=request, name="root.html", context=ctx)
 
 
@@ -355,6 +443,26 @@ def _quit(request: Request):
     return RedirectResponse(request.url_for("_root"), 303)
 
 
+@app.post("/lang")
+def _set_lang(request: Request, lang: str = Form(...)):
+    """Switch the active UI language."""
+    if lang in _available_langs():
+        state.lang = lang
+        if tasks:
+            state.task_title = _entry_prompt(tasks[state.task_index], lang)
+    return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.post("/custom-tasks")
+def _custom_tasks_route(request: Request, file: str = Form("")):
+    """Switch the active task pack (base catalog, or a file from custom_tasks_dir)."""
+    try:
+        _set_custom_tasks(file)
+    except ValueError:
+        pass
+    return RedirectResponse(request.url_for("_root"), 303)
+
+
 @app.post("/arm/start")
 def _arm_start(request: Request):
     """Start (power on) the arm(s)."""
@@ -377,9 +485,9 @@ async def _select_tasks(request: Request):
     task_ids = form.getlist("task_id")
     if not task_ids:
         return RedirectResponse(request.url_for("_root"), 303)
-    tasks = [{"prompt": LIBRARY.get(tid).prompt, "task_id": tid} for tid in task_ids]
+    tasks = [_task_entry(tid) for tid in task_ids]
     state.task_index = 0
-    state.task_title = tasks[0]["prompt"]
+    state.task_title = _entry_prompt(tasks[0], state.lang)
     state.template_ready = True
     return RedirectResponse(request.url_for("_root"), 303)
 
@@ -388,13 +496,10 @@ async def _select_tasks(request: Request):
 def _select_template(request: Request, template_id: str = Form(...)):
     """Load tasks from the task library for the chosen template."""
     global tasks
-    template = LIBRARY.get_template(template_id)
-    tasks = [
-        {"prompt": LIBRARY.get(tid).prompt, "task_id": tid}
-        for tid in template.task_ids
-    ]
+    template = library.get_template(template_id)
+    tasks = [_task_entry(tid) for tid in template.task_ids]
     state.task_index = 0
-    state.task_title = tasks[0]["prompt"]
+    state.task_title = _entry_prompt(tasks[0], state.lang)
     state.template_ready = True
     return RedirectResponse(request.url_for("_root"), 303)
 
@@ -493,6 +598,12 @@ def main():
         type=pathlib.Path,
     )
     parser.add_argument(
+        "--custom-tasks-dir",
+        default=os.getenv("CUSTOM_TASKS_DIR", "custom_tasks"),
+        help="Directory of selectable task-pack files (*.yaml/*.yml/*.py)",
+        type=pathlib.Path,
+    )
+    parser.add_argument(
         "--auto-open",
         action=argparse.BooleanOptionalAction,
         default=os.getenv("AUTO_OPEN", "") == "yes",
@@ -510,11 +621,13 @@ def main():
     auto_open = args.auto_open
     global port
     port = args.port
+    global custom_tasks_dir
+    custom_tasks_dir = args.custom_tasks_dir
     if args.metadata_file:
         metadata = load_yaml(args.metadata_file)
         if "tasks" in metadata:
             tasks = metadata["tasks"]
-            state.task_title = tasks[0]["prompt"]
+            state.task_title = _entry_prompt(tasks[0], state.lang)
             state.template_ready = True
 
     node = dora.Node()

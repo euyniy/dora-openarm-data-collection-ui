@@ -374,10 +374,74 @@
         box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
       }
       .run-btn:disabled { opacity: 0.3; cursor: default; }
+
+      .lang-switcher {
+        display: flex;
+        gap: 8px;
+        align-self: flex-end;
+      }
+      .lang-btn {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-size: 13px;
+        font-weight: bold;
+        letter-spacing: 0.1em;
+        padding: 6px 16px;
+        border-radius: 999px;
+        cursor: pointer;
+        background: #1a1a2e;
+        color: #666;
+        border: 1px solid rgba(255,255,255,0.08);
+        transition: all 0.15s ease;
+      }
+      .lang-btn.active {
+        color: #00e5ff;
+        border-color: rgba(0, 229, 255, 0.5);
+        background: rgba(0, 229, 255, 0.08);
+      }
+      .lang-btn:hover:not(.active) { color: #aaa; }
+
+      .custom-tasks-picker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .custom-tasks-select {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-size: 13px;
+        padding: 6px 12px;
+        border-radius: 8px;
+        background: #1a1a2e;
+        color: #ccc;
+        border: 1px solid rgba(255,255,255,0.08);
+      }
     </style>
   </head>
   <body>
+    {% if available_langs|length > 1 -%}
+    <div class="lang-switcher" style="max-width:900px;width:100%">
+      {% for l in available_langs -%}
+      <form action="{{ url_for("_set_lang") }}" method="post">
+        <input type="hidden" name="lang" value="{{ l }}">
+        <button class="lang-btn{{ ' active' if l == current_lang else '' }}" type="submit">{{ l | upper }}</button>
+      </form>
+      {% endfor -%}
+    </div>
+    {% endif -%}
+
     {% if not state.template_ready -%}
+    {% if available_custom_task_files -%}
+    <div class="custom-tasks-picker" style="max-width:900px;width:100%">
+      <span class="filter-label">Task pack</span>
+      <form action="{{ url_for("_custom_tasks_route") }}" method="post">
+        <select class="custom-tasks-select" name="file" onchange="this.form.submit()">
+          <option value="" {{ "selected" if not state.custom_tasks_file else "" }}>Base catalog</option>
+          {% for f in available_custom_task_files -%}
+          <option value="{{ f }}" {{ "selected" if f == state.custom_tasks_file else "" }}>{{ f }}</option>
+          {% endfor -%}
+        </select>
+      </form>
+    </div>
+    {% endif -%}
     <div class="template-selector-title" style="max-width:900px;width:100%">Select task template</div>
     <div class="template-selector">
       {% for tmpl in task_templates -%}
