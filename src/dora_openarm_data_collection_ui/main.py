@@ -41,13 +41,31 @@ node = None
 auto_open = False
 port = None
 
+# The desktop launcher that supervises `dora run`. The task screen sends the
+# operator back to it when this dataflow dies, so that the failure is shown
+# on screen instead of only in a terminal.
+launcher_url = "http://127.0.0.1:8080/"
+
+# Operation manual shown on the task screen (see --manual-file).
+manual = None
+
+
+# Browser openers, most specific first. "open" is macOS, "xdg-open" is Linux.
+_BROWSER_COMMANDS = ("xdg-open", "gio", "open")
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Open a Web browser automatically if requested."""
     if auto_open:
         url = f"http://127.0.0.1:{port}"
-        await asyncio.create_subprocess_exec("open", url)
+        for command in _BROWSER_COMMANDS:
+            argv = [command, "open", url] if command == "gio" else [command, url]
+            try:
+                await asyncio.create_subprocess_exec(*argv)
+                break
+            except (FileNotFoundError, OSError):
+                continue
     yield
 
 
@@ -63,11 +81,41 @@ class State:
     episode_number: int = 0
     task_index: int = 0
     task_title: str = ""
+    # The dataset language instruction (tasks[].prompt), kept even when
+    # task_title shows the Japanese tasks[].prompt_ja.
+    task_prompt: str = ""
+    task_description: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
+    # Failures to show in red on the task screen: newest last.
+    # [{"time", "source", "message", "count"}]
+    errors: list = dataclasses.field(default_factory=list)
 
 
 state = State()
+
+# Keep the newest failures only; the launcher log has the full history.
+MAX_ERRORS = 20
+
+
+def _record_error(source, message):
+    """Remember a failure for the task screen. Returns True when it is new."""
+    message = " ".join(str(message).split())
+    if not message:
+        return False
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    for error in state.errors:
+        if error["message"] == message:
+            # A repeating failure updates its counter instead of piling up.
+            error["count"] += 1
+            error["time"] = now
+            return False
+    state.errors.append(
+        {"time": now, "source": str(source), "message": message, "count": 1}
+    )
+    del state.errors[:-MAX_ERRORS]
+    return True
+
 
 _state_changed = asyncio.Condition()
 
@@ -123,6 +171,15 @@ vr_stats = VrStreamStats()
 vr_timestamps: collections.deque = collections.deque(maxlen=VR_TIMESTAMP_WINDOW)
 
 
+def _event_field(event, name, default=None):
+    """Read a field from a dora event, which only supports __getitem__."""
+    try:
+        value = event[name]
+    except (KeyError, TypeError, AttributeError):
+        return default
+    return default if value is None else value
+
+
 def _event_ts_to_seconds(ts) -> float:
     """Normalize a dora event timestamp (datetime or ns int) to POSIX seconds."""
     if isinstance(ts, datetime.datetime):
@@ -175,12 +232,23 @@ async def _notify_state_changed() -> None:
         _state_changed.notify_all()
 
 
+def apply_task(index):
+    """Show the task at the given index, in Japanese when the metadata has it."""
+    task = tasks[index]
+    state.task_index = index
+    # prompt_ja / description_ja are display only: prompt stays English so the
+    # recorded dataset keeps its language instruction.
+    state.task_title = task.get("prompt_ja") or task.get("prompt", "")
+    state.task_prompt = task.get("prompt", "")
+    state.task_description = task.get("description_ja") or task.get("description", "")
+
+
 def next_task():
     """Update the state with the next task."""
-    state.task_index += 1
-    if state.task_index >= len(tasks):
-        state.task_index = 0
-    state.task_title = tasks[state.task_index]["prompt"]
+    index = state.task_index + 1
+    if index >= len(tasks):
+        index = 0
+    apply_task(index)
 
 
 def _command_start():
@@ -234,8 +302,33 @@ def _root(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="root.html",
-        context={"state": state, "state_version": state_version},
+        context={
+            "state": state,
+            "state_version": state_version,
+            "manual": manual,
+            "launcher_url": launcher_url,
+        },
     )
+
+
+@app.post("/api/error")
+async def _api_error(request: Request):
+    """Accept a failure from outside (the launcher forwards dataflow output)."""
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = {}
+    if _record_error(payload.get("source", "dataflow"), payload.get("message", "")):
+        await _notify_state_changed()
+    return {"ok": True}
+
+
+@app.post("/errors/clear")
+async def _clear_errors(request: Request):
+    """Clear the failures shown on the task screen."""
+    state.errors.clear()
+    await _notify_state_changed()
+    return RedirectResponse(request.url_for("_root"), 303)
 
 
 @app.post("/start")
@@ -349,8 +442,36 @@ def _arm_stop(request: Request):
 
 def load_yaml(path):
     """Load a YAML file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_manual(path):
+    """Load the operation manual shown on the task screen.
+
+    The file is YAML:
+
+        title: 操作マニュアル
+        sections:
+          - title: アームの同期手順
+            steps: ["...", "..."]
+            note: "..."
+    """
+    if not path:
+        return None
+    path = pathlib.Path(path)
+    if not path.exists():
+        _record_error("ui", f"操作マニュアルが見つかりません: {path}")
+        return None
+    try:
+        loaded = load_yaml(path)
+    except yaml.YAMLError as error:
+        _record_error("ui", f"操作マニュアルを読み込めません: {error}")
+        return None
+    if not isinstance(loaded, dict) or not loaded.get("sections"):
+        _record_error("ui", f"操作マニュアルに sections がありません: {path}")
+        return None
+    return loaded
 
 
 async def _main_uvicorn(server):
@@ -369,6 +490,18 @@ async def _main_dora(server):
         event = node.next()
         if event["type"] == "STOP":
             state.running = False
+        elif event["type"] == "ERROR":
+            # Show dora's own failures on the task screen, not just on stderr.
+            _record_error("dora", _event_field(event, "error", "unknown dora error"))
+            await _notify_state_changed()
+        elif event["type"] == "INPUT_CLOSED":
+            # A node that ends while we are still running has died.
+            _record_error(
+                "dora",
+                f"入力 {_event_field(event, 'id', '?')} が停止しました"
+                "（ノードが終了した可能性があります）",
+            )
+            await _notify_state_changed()
         elif event["type"] == "INPUT":
             event_id = event["id"]
             if event_id in CAMERA_INPUTS:
@@ -453,14 +586,31 @@ def main():
         help=f"The port for UI ({default_port})",
         type=int,
     )
+    parser.add_argument(
+        "--manual-file",
+        default=os.getenv("MANUAL_FILE"),
+        help="The operation manual (YAML) shown on the task screen",
+        type=pathlib.Path,
+    )
+    default_launcher_url = "http://127.0.0.1:8080/"
+    parser.add_argument(
+        "--launcher-url",
+        default=os.getenv("LAUNCHER_URL", default_launcher_url),
+        help=f"The desktop launcher URL to fall back to on failure ({default_launcher_url})",
+    )
     args = parser.parse_args()
     global auto_open
     auto_open = args.auto_open
     global port
     port = args.port
+    global launcher_url
+    # The template appends paths ("log", "status") to this.
+    launcher_url = args.launcher_url.rstrip("/") + "/"
+    global manual
+    manual = load_manual(args.manual_file)
     metadata = load_yaml(args.metadata_file)
     tasks = metadata["tasks"]
-    state.task_title = tasks[state.task_index]["prompt"]
+    apply_task(state.task_index)
 
     node = dora.Node()
     asyncio.run(_main_async())

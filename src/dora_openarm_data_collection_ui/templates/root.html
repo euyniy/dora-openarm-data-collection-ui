@@ -1,21 +1,75 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
   <head>
-    <title>OpenArm data collection UI</title>
+    <meta charset="utf-8">
+    <title>OpenArm データ収集</title>
+    {% set ARM_STATUS_JA = {
+      "stopped": "停止中",
+      "started": "起動済み（未同期）",
+      "aligned": "同期済み"
+    } %}
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
 
       body {
-        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-family: "Noto Sans JP", "Noto Sans CJK JP", "Hiragino Sans",
+                     "Yu Gothic", sans-serif;
         background: #0a0a0f;
         color: #e0e0e0;
         min-height: 100vh;
         display: flex;
         flex-direction: column;
         align-items: center;
-        padding: 48px 24px;
-        gap: 32px;
+        padding: 32px 24px 64px;
+        gap: 28px;
       }
+
+      .mono {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+      }
+
+      /* --- エラー表示 ------------------------------------------------ */
+
+      .alert {
+        width: min(1000px, 100%);
+        background: #2a0f16;
+        border: 3px solid #ff3355;
+        border-radius: 16px;
+        padding: 20px 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        box-shadow: 0 0 24px rgba(255, 51, 85, 0.35);
+      }
+      .alert-title {
+        font-size: 28px;
+        font-weight: bold;
+        color: #ff3355;
+      }
+      .alert-hint { font-size: 17px; color: #ffd7de; line-height: 1.7; }
+      .alert-list {
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+      .alert-list li {
+        font-size: 15px;
+        color: #ff8fa3;
+        background: rgba(255, 51, 85, 0.08);
+        border-left: 4px solid #ff3355;
+        padding: 8px 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .alert-list .meta { color: #ff5f7a; margin-right: 8px; }
+      .alert-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+      .alert-actions .big-button { font-size: 16px; padding: 10px 20px; margin: 0; }
+      #connection-lost { display: none; }
+
+      /* --- 状態表示 -------------------------------------------------- */
 
       .top-row {
         display: flex;
@@ -33,23 +87,9 @@
         text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
       }
 
-      .task {
-        font-size: 36px;
-        font-weight: bold;
-        color: #00e5ff;
-        text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
-      }
-
-      div:not(.top-row):not(.status):not(.camera-stats) > div:last-child {
-        color: #888;
-        font-size: 18px;
-        margin-top: 4px;
-      }
-
       .status {
         font-size: 20px;
         font-weight: bold;
-        text-transform: uppercase;
         letter-spacing: 0.15em;
       }
 
@@ -63,7 +103,6 @@
       }
 
       .status.idle {
-        color: white;
         background: #00ff88;
         color: #0a0a0f;
         padding: 10px 24px;
@@ -82,15 +121,13 @@
       }
       .arm-label {
         font-size: 16px;
-        text-transform: uppercase;
         letter-spacing: 0.15em;
         color: #888;
       }
       .arm-badge {
         font-size: 16px;
         font-weight: bold;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
+        letter-spacing: 0.05em;
         padding: 6px 16px;
         border-radius: 9999px;
         color: #0a0a0f;
@@ -104,11 +141,34 @@
         margin: 0;
       }
 
+      /* --- タスク ---------------------------------------------------- */
+
+      .task-card {
+        width: min(1000px, 100%);
+        background: #1a1a2e;
+        border-radius: 16px;
+        padding: 28px 36px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        align-items: center;
+        text-align: center;
+      }
+      .task-label { font-size: 16px; color: #888; letter-spacing: 0.15em; }
+      .task-title {
+        font-size: 40px;
+        font-weight: bold;
+        color: #00e5ff;
+        text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
+        line-height: 1.4;
+      }
+      .task-description { font-size: 19px; color: #c8c8d8; line-height: 1.7; }
+      .task-prompt { font-size: 14px; color: #666; }
+
       .big-button {
-        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-family: inherit;
         font-size: 28px;
         font-weight: bold;
-        text-transform: uppercase;
         letter-spacing: 0.1em;
         padding: 20px 48px;
         margin: 10px;
@@ -153,7 +213,10 @@
         box-shadow: 0 0 12px rgba(136, 136, 136, 0.2);
       }
 
+      .buttons { display: flex; flex-wrap: wrap; justify-content: center; }
       form { display: inline; }
+
+      /* --- ストリーム状態 -------------------------------------------- */
 
       .camera-stats {
         background: #1a1a2e;
@@ -166,14 +229,13 @@
       }
       .camera-stats-title {
         font-size: 14px;
-        text-transform: uppercase;
         letter-spacing: 0.15em;
         color: #888;
         margin-bottom: 6px;
       }
       .stat-row {
         display: grid;
-        grid-template-columns: 110px 90px 1fr;
+        grid-template-columns: 130px 90px 1fr;
         gap: 12px;
         align-items: baseline;
         font-size: 16px;
@@ -188,107 +250,233 @@
       .stat-row.stale .cam-fps,
       .stat-row.stale .cam-jitter { color: #555; }
 
+      .stream-alert {
+        display: none;
+        color: #ff3355;
+        font-size: 16px;
+        font-weight: bold;
+        margin-top: 8px;
+      }
+
       .vr-stats { margin-top: 12px; }
       .vr-stats .cam-fps { color: #b388ff; }
+
+      /* --- 操作マニュアル -------------------------------------------- */
+
+      .manual {
+        width: min(1000px, 100%);
+        background: #12121f;
+        border-radius: 16px;
+        padding: 8px 28px;
+      }
+      .manual > summary {
+        cursor: pointer;
+        font-size: 20px;
+        font-weight: bold;
+        color: #00e5ff;
+        padding: 16px 0;
+        list-style: none;
+      }
+      .manual > summary::before { content: "📖 "; }
+      .manual-section { margin: 0 0 20px; }
+      .manual-section h3 {
+        font-size: 18px;
+        color: #ffcc00;
+        margin-bottom: 8px;
+      }
+      .manual-section ol, .manual-section ul {
+        padding-left: 1.6em;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .manual-section li { font-size: 17px; line-height: 1.7; color: #d8d8e4; }
+      .manual-note {
+        font-size: 15px;
+        color: #ffcc00;
+        background: rgba(255, 204, 0, 0.08);
+        border-left: 4px solid #ffcc00;
+        padding: 8px 12px;
+        margin-top: 8px;
+        line-height: 1.7;
+      }
     </style>
   </head>
   <body>
+    {% if state.errors -%}
+      <div class="alert" id="error-panel">
+        <div class="alert-title">⚠ エラーが発生しています</div>
+        <div class="alert-hint">
+          収録を続ける前に内容を確認してください。解消しない場合は、下の内容を担当者に伝えてください。
+        </div>
+        <ul class="alert-list">
+          {% for error in state.errors | reverse -%}
+            <li>
+              <span class="meta mono">[{{ error.time }}] {{ error.source }}{% if error.count > 1 %} ×{{ error.count }}{% endif %}</span>
+              {{ error.message }}
+            </li>
+          {% endfor -%}
+        </ul>
+        <div class="alert-actions">
+          <form action="{{ url_for("_clear_errors") }}" method="post">
+            <input class="big-button quit" type="submit" value="エラー表示を消す">
+          </form>
+          <a class="big-button quit" href="{{ launcher_url }}log" target="_blank"
+             style="text-decoration: none;">詳しいログを見る</a>
+        </div>
+      </div>
+    {% endif -%}
+
+    <div class="alert" id="connection-lost">
+      <div class="alert-title">⚠ データ収集が停止しました</div>
+      <div class="alert-hint">
+        画面とデータ収集プログラムの接続が切れました。異常終了した可能性があります。<br>
+        起動画面に戻って内容を確認してください。
+      </div>
+      <div class="alert-actions">
+        <a class="big-button quit" href="{{ launcher_url }}"
+           style="text-decoration: none;">起動画面に戻る</a>
+      </div>
+    </div>
+
     <div class="top-row">
       <div class="episode">
-        Episode: {{ state.episode_number }}
+        エピソード: <span class="mono">{{ state.episode_number }}</span>
       </div>
 
       {% if state.collecting -%}
-        <div class="status collecting">Collecting</div>
+        <div class="status collecting">収録中</div>
       {% else -%}
-        <div class="status idle">Idle</div>
+        <div class="status idle">待機中</div>
       {% endif -%}
     </div>
 
     <div class="arm-row">
-      <div class="arm-label">Arm</div>
-      <div class="arm-badge {{ state.arm_status_left }}">L: {{ state.arm_status_left | upper }}</div>
-      <div class="arm-badge {{ state.arm_status_right }}">R: {{ state.arm_status_right | upper }}</div>
+      <div class="arm-label">アーム</div>
+      <div class="arm-badge {{ state.arm_status_left }}">左: {{ ARM_STATUS_JA.get(state.arm_status_left, state.arm_status_left) }}</div>
+      <div class="arm-badge {{ state.arm_status_right }}">右: {{ ARM_STATUS_JA.get(state.arm_status_right, state.arm_status_right) }}</div>
       {% if state.arm_status_right == "stopped" and state.arm_status_left == "stopped" -%}
         <form id="arm-start-form" action="{{ url_for("_arm_start") }}" method="post">
-          <input class="big-button start arm-toggle" type="submit" value="Start Arm">
+          <input class="big-button start arm-toggle" type="submit" value="アーム起動">
         </form>
       {% else -%}
         <form id="arm-stop-form" action="{{ url_for("_arm_stop") }}" method="post">
-          <input class="big-button finish arm-toggle" type="submit" value="Pause Arm">
+          <input class="big-button finish arm-toggle" type="submit" value="アーム停止">
         </form>
       {% endif -%}
     </div>
 
-    <div class="task">Task: {{ state.task_index }}</div>
-    <div>({{ state.task_title }})</div>
+    <div class="task-card">
+      <div class="task-label">タスク <span class="mono">{{ state.task_index }}</span></div>
+      <div class="task-title">{{ state.task_title }}</div>
+      {% if state.task_description -%}
+        <div class="task-description">{{ state.task_description }}</div>
+      {% endif -%}
+      {% if state.task_prompt and state.task_prompt != state.task_title -%}
+        <div class="task-prompt">{{ state.task_prompt }}</div>
+      {% endif -%}
+    </div>
 
-    {% if state.collecting -%}
-      <form id="finish-form" action="{{ url_for("_success") }}" method="post">
-        <input class="big-button finish" type="submit" value="Success!">
-      </form>
+    <div class="buttons">
+      {% if state.collecting -%}
+        <form id="finish-form" action="{{ url_for("_success") }}" method="post">
+          <input class="big-button start" type="submit" value="成功で終了">
+        </form>
 
-      <form id="fail-form" action="{{ url_for("_fail") }}" method="post">
-        <input class="big-button finish" type="submit" value="Fail!">
-      </form>
+        <form id="fail-form" action="{{ url_for("_fail") }}" method="post">
+          <input class="big-button finish" type="submit" value="失敗で終了">
+        </form>
 
-      <form id="cancel-form" action="{{ url_for("_cancel") }}" method="post">
-        <input class="big-button finish" type="submit" value="Cancel!">
-      </form>
-    {% else -%}
-      <form id="start-form" action="{{ url_for("_start") }}" method="post">
-        <input class="big-button start" type="submit" value="Start!">
-      </form>
-      <form id="skip-form" action="{{ url_for("_skip") }}" method="post">
-        <input class="big-button start" type="submit" value="Skip task">
-      </form>
-    {% endif -%}
+        <form id="cancel-form" action="{{ url_for("_cancel") }}" method="post">
+          <input class="big-button quit" type="submit" value="取り消し">
+        </form>
+      {% else -%}
+        <form id="start-form" action="{{ url_for("_start") }}" method="post">
+          <input class="big-button start" type="submit" value="スタート">
+        </form>
+        <form id="skip-form" action="{{ url_for("_skip") }}" method="post">
+          <input class="big-button quit" type="submit" value="このタスクを飛ばす">
+        </form>
+      {% endif -%}
+    </div>
 
     <div class="camera-stats">
-      <div class="camera-stats-title">Camera streams</div>
+      <div class="camera-stats-title">カメラ映像</div>
       <div class="stat-row stale" data-cam="camera_wrist_right">
-        <span class="cam-name">wrist R</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">手首（右）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_wrist_left">
-        <span class="cam-name">wrist L</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">手首（左）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_head_left">
-        <span class="cam-name">head L</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">頭部（左）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_head_right">
-        <span class="cam-name">head R</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">頭部（右）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_ceiling">
-        <span class="cam-name">ceiling</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">天井</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
+      </div>
+      <div class="stream-alert" id="camera-alert">
+        ⚠ 映像が届いていないカメラがあります（USB を確認してください）
       </div>
     </div>
 
     <div class="camera-stats vr-stats">
-      <div class="camera-stats-title">VR stream (raw UDP)</div>
+      <div class="camera-stats-title">VR ストリーム（UDP）</div>
       <div class="stat-row stale" data-vr="vr_rx">
         <span class="cam-name">VR</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
     </div>
 
+    {% if manual -%}
+      <details class="manual">
+        <summary>{{ manual.title | default("操作マニュアル") }}</summary>
+        {% for section in manual.sections -%}
+          <div class="manual-section">
+            <h3>{{ section.title }}</h3>
+            {% if section.steps -%}
+              <ol>
+                {% for step in section.steps -%}
+                  <li>{{ step }}</li>
+                {% endfor -%}
+              </ol>
+            {% endif -%}
+            {% if section.bullets -%}
+              <ul>
+                {% for bullet in section.bullets -%}
+                  <li>{{ bullet }}</li>
+                {% endfor -%}
+              </ul>
+            {% endif -%}
+            {% if section.note -%}
+              <div class="manual-note">{{ section.note }}</div>
+            {% endif -%}
+          </div>
+        {% endfor -%}
+      </details>
+    {% endif -%}
+
     {% if state.running -%}
       <form id="quit-form" action="{{ url_for("_quit") }}" method="post">
-        <input class="big-button quit" type="submit" value="Quit">
+        <input class="big-button quit" type="submit" value="終了">
       </form>
     {% endif -%}
 
     <script>
+      const LAUNCHER_URL = "{{ launcher_url }}";
       const LONG_PRESS_MS = 1000;
       let skipTimer = null;
       let cancelTimer = null;
@@ -389,6 +577,36 @@
         location.reload();
       };
 
+      // The dataflow dying takes this page's event stream with it. Tell the
+      // operator on screen instead of leaving a silently frozen page.
+      const CONNECTION_LOST_AFTER_MS = 4000;
+      let connectionLostTimer = null;
+
+      eventSource.onopen = () => {
+        clearTimeout(connectionLostTimer);
+        connectionLostTimer = null;
+        document.getElementById("connection-lost").style.display = "none";
+      };
+
+      eventSource.onerror = () => {
+        if (connectionLostTimer) return;
+        connectionLostTimer = setTimeout(async () => {
+          connectionLostTimer = null;
+          if (eventSource.readyState === EventSource.OPEN) return;
+          document.getElementById("connection-lost").style.display = "flex";
+          // The launcher outlives the dataflow: it holds the failure detail.
+          try {
+            const status = await (await fetch(LAUNCHER_URL + "status",
+                                              {cache: "no-store"})).json();
+            if (status.state === "error" || status.state === "stopped") {
+              window.location.href = LAUNCHER_URL;
+            }
+          } catch (e) {
+            // No launcher (started by hand): keep showing the banner.
+          }
+        }, CONNECTION_LOST_AFTER_MS);
+      };
+
       const FPS_ERROR = 20;
       const JITTER_WARN_MS = 10;
       const JITTER_ERROR_MS = 30;
@@ -396,6 +614,7 @@
       const statsSource = new EventSource("/stats");
       statsSource.onmessage = (e) => {
         const stats = JSON.parse(e.data);
+        let stale = 0;
         for (const [cam, s] of Object.entries(stats)) {
           const row = document.querySelector(`[data-cam="${cam}"]`);
           if (!row) continue;
@@ -406,6 +625,7 @@
             jitterEl.textContent = "Δ -- ms";
             row.classList.add("stale");
             row.classList.remove("warn", "error");
+            stale += 1;
             continue;
           }
           row.classList.remove("stale");
@@ -416,6 +636,8 @@
           row.classList.toggle("error", isError);
           row.classList.toggle("warn", isWarn);
         }
+        document.getElementById("camera-alert").style.display =
+          stale > 0 ? "block" : "none";
       };
 
       const VR_FPS_ERROR = 50;        // expect ~72 Hz from the headset
