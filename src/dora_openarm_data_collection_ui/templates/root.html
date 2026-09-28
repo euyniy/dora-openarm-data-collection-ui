@@ -68,6 +68,18 @@
       .alert-actions { display: flex; gap: 12px; flex-wrap: wrap; }
       .alert-actions .big-button { font-size: 16px; padding: 10px 20px; margin: 0; }
       #connection-lost { display: none; }
+      #ending-panel {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        width: 100%;
+        min-height: 100vh;
+        justify-content: center;
+        background: #1a1a2e;
+        border-color: #00e5ff;
+      }
+      #ending-panel .alert-title { color: #00e5ff; }
 
       /* --- 状態表示 -------------------------------------------------- */
 
@@ -426,6 +438,17 @@
       </div>
     </div>
 
+    <div class="alert" id="ending-panel">
+      <div class="alert-title">終了しています…</div>
+      <div class="alert-hint" id="ending-hint">
+        収録データを保存してから、メニューに戻ります。しばらくお待ちください。
+      </div>
+      <div class="alert-actions" id="ending-actions" hidden>
+        <a class="big-button quit" href="{{ launcher_url }}"
+           style="text-decoration: none;">ランチャーの状態を確認</a>
+      </div>
+    </div>
+
     <div class="top-row">
       <div class="episode">
         エピソード: <span class="mono">{{ state.episode_number }}</span>
@@ -592,6 +615,7 @@
 
     <script>
       const LAUNCHER_URL = "{{ launcher_url }}";
+      const LAUNCHER_SESSION_ID = {{ launcher_session_id_json | safe }};
       const LONG_PRESS_MS = 1000;
       // A start->finish toggle is two separate <form> submits (page
       // navigations, since these POST and 303-redirect), so we can't just
@@ -626,8 +650,65 @@
         cooldownToastTimer = setTimeout(() => toast.classList.remove("show"), 800);
       }
 
+      async function requestQuit(confirmFirst) {
+        if (window.quitRequestPending) return;
+        if (confirmFirst && !window.confirm("現在のデータ収集を終了しますか？")) return;
+
+        window.quitRequestPending = true;
+        const form = document.getElementById("quit-form");
+        if (form) {
+          const button = form.querySelector("input[type=submit]");
+          if (button) {
+            button.value = "終了しています…";
+            button.disabled = true;
+          }
+        }
+        document.getElementById("ending-panel").style.display = "flex";
+
+        try {
+          await fetch("/quit", {method: "POST"});
+        } catch (e) {
+          // The UI server shuts down after it sends the Dora quit command.
+        }
+
+        const deadline = Date.now() + 60000;
+        while (Date.now() < deadline) {
+          try {
+            const response = await fetch(LAUNCHER_URL + "status", {cache: "no-store"});
+            const status = await response.json();
+            if (status.session_id !== LAUNCHER_SESSION_ID) {
+              window.location.href = LAUNCHER_URL;
+              return;
+            }
+            if (status.session_state === "idle" && !status.busy) {
+              window.location.href = LAUNCHER_URL + "menu";
+              return;
+            }
+            if (status.session_state === "error") {
+              window.location.href = LAUNCHER_URL;
+              return;
+            }
+          } catch (e) {
+            // Keep waiting while the launcher finishes process cleanup.
+          }
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        document.getElementById("ending-hint").textContent =
+          "終了処理に時間がかかっています。ランチャーで状態を確認してください。";
+        document.getElementById("ending-actions").hidden = false;
+      }
+
+      const quitForm = document.getElementById("quit-form");
+      if (quitForm) {
+        quitForm.addEventListener("submit", event => {
+          event.preventDefault();
+          requestQuit(true);
+        });
+      }
+
       document.addEventListener("keydown", function(event) {
-        if (event.repeat) return;
+        if (event.repeat || window.quitRequestPending) return;
 
         if (event.key.toLowerCase() === "c") {
           if (!skipTimer) {
@@ -683,6 +764,7 @@
       });
 
       document.addEventListener("keyup", (event) => {
+        if (window.quitRequestPending) return;
         if (event.key.toLowerCase() === "c") {
           if (skipTimer) {
             clearTimeout(skipTimer);
@@ -713,7 +795,7 @@
             clearTimeout(armTimer);
             armTimer = null;
             const quitForm = document.getElementById("quit-form");
-            if (quitForm) quitForm.submit();
+            if (quitForm) requestQuit(false);
           }
         }
 
@@ -754,12 +836,18 @@
         connectionLostTimer = setTimeout(async () => {
           connectionLostTimer = null;
           if (eventSource.readyState === EventSource.OPEN) return;
+          if (window.quitRequestPending) return;
           document.getElementById("connection-lost").style.display = "flex";
           // The launcher outlives the dataflow: it holds the failure detail.
           try {
             const status = await (await fetch(LAUNCHER_URL + "status",
                                               {cache: "no-store"})).json();
-            if (status.state === "error" || status.state === "stopped") {
+            if (status.session_id === LAUNCHER_SESSION_ID &&
+                status.session_state === "idle" && !status.busy) {
+              window.location.href = LAUNCHER_URL + "menu";
+            } else if (status.session_state === "error" ||
+                       (!status.session_state &&
+                        (status.state === "error" || status.state === "stopped"))) {
               window.location.href = LAUNCHER_URL;
             }
           } catch (e) {

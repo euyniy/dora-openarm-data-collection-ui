@@ -31,6 +31,8 @@ import os
 import pathlib
 import pyarrow as pa
 import time
+import urllib.error
+import urllib.request
 import uvicorn
 import yaml
 
@@ -79,6 +81,8 @@ class State:
 
     collecting: bool = False
     running: bool = True
+    ending: bool = False
+    quit_requested: bool = False
     episode_number: int = 0
     task_index: int = 0
     task_title: str = ""
@@ -452,10 +456,36 @@ def _command_fail():
     next_task()
 
 
-def _command_quit():
-    """Quit this data collection."""
+def _notify_launcher_session_ending():
+    """Tell the supervising launcher this UI session is ending."""
+    session_id = os.getenv("LAUNCHER_SESSION_ID")
+    if not session_id:
+        return True  # The UI can also be run directly, outside the launcher.
+    request = urllib.request.Request(
+        launcher_url.rstrip("/") + "/session/end",
+        data=json.dumps({"session_id": session_id}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            return response.status == 202 and result.get("accepted") is True
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+async def _command_quit():
+    """Request launcher shutdown, then let Dora close the collection flow."""
+    if state.quit_requested:
+        return True
+    state.quit_requested = True
+    state.ending = True
+    launcher_notified = await asyncio.to_thread(_notify_launcher_session_ending)
     node.send_output("command", pa.array(["quit"]))
     state.running = False
+    await _notify_state_changed()
+    return launcher_notified
 
 
 def _command_arm_start():
@@ -479,6 +509,7 @@ def _root(request: Request):
             "state_version": state_version,
             "manual": manual,
             "launcher_url": launcher_url,
+            "launcher_session_id_json": json.dumps(os.getenv("LAUNCHER_SESSION_ID") or ""),
         },
     )
 
@@ -640,9 +671,9 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
 
 
 @app.post("/quit")
-def _quit(request: Request):
-    _command_quit()
-    return RedirectResponse(request.url_for("_root"), 303)
+async def _quit():
+    launcher_notified = await _command_quit()
+    return {"accepted": True, "launcher_notified": launcher_notified}
 
 
 @app.post("/arm/start")
@@ -772,7 +803,7 @@ async def _main_dora(server):
                 if event_id == "button_a":
                     _command_start()
                 elif event_id == "button_b":
-                    _command_quit()
+                    await _command_quit()
 
             await _notify_state_changed()
     server.should_exit = True
