@@ -1,21 +1,87 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
   <head>
-    <title>OpenArm data collection UI</title>
+    <meta charset="utf-8">
+    <title>OpenArm データ収集</title>
+    {% set ARM_STATUS_JA = {
+      "stopped": "停止中",
+      "started": "起動済み（未同期）",
+      "aligned": "同期済み"
+    } %}
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
 
       body {
-        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-family: "Noto Sans JP", "Noto Sans CJK JP", "Hiragino Sans",
+                     "Yu Gothic", sans-serif;
         background: #0a0a0f;
         color: #e0e0e0;
         min-height: 100vh;
         display: flex;
         flex-direction: column;
         align-items: center;
-        padding: 48px 24px;
-        gap: 32px;
+        padding: 32px 24px 64px;
+        gap: 28px;
       }
+
+      .mono {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+      }
+
+      /* --- エラー表示 ------------------------------------------------ */
+
+      .alert {
+        width: min(1000px, 100%);
+        background: #2a0f16;
+        border: 3px solid #ff3355;
+        border-radius: 16px;
+        padding: 20px 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        box-shadow: 0 0 24px rgba(255, 51, 85, 0.35);
+      }
+      .alert-title {
+        font-size: 28px;
+        font-weight: bold;
+        color: #ff3355;
+      }
+      .alert-hint { font-size: 17px; color: #ffd7de; line-height: 1.7; }
+      .alert-list {
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+      .alert-list li {
+        font-size: 15px;
+        color: #ff8fa3;
+        background: rgba(255, 51, 85, 0.08);
+        border-left: 4px solid #ff3355;
+        padding: 8px 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .alert-list .meta { color: #ff5f7a; margin-right: 8px; }
+      .alert-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+      .alert-actions .big-button { font-size: 16px; padding: 10px 20px; margin: 0; }
+      #connection-lost { display: none; }
+      #ending-panel {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        width: 100%;
+        min-height: 100vh;
+        justify-content: center;
+        background: #1a1a2e;
+        border-color: #00e5ff;
+      }
+      #ending-panel .alert-title { color: #00e5ff; }
+
+      /* --- 状態表示 -------------------------------------------------- */
 
       .top-row {
         display: flex;
@@ -33,23 +99,9 @@
         text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
       }
 
-      .task {
-        font-size: 36px;
-        font-weight: bold;
-        color: #00e5ff;
-        text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
-      }
-
-      div:not(.top-row):not(.status):not(.camera-stats) > div:last-child {
-        color: #888;
-        font-size: 18px;
-        margin-top: 4px;
-      }
-
       .status {
         font-size: 20px;
         font-weight: bold;
-        text-transform: uppercase;
         letter-spacing: 0.15em;
       }
 
@@ -63,7 +115,6 @@
       }
 
       .status.idle {
-        color: white;
         background: #00ff88;
         color: #0a0a0f;
         padding: 10px 24px;
@@ -82,15 +133,13 @@
       }
       .arm-label {
         font-size: 16px;
-        text-transform: uppercase;
         letter-spacing: 0.15em;
         color: #888;
       }
       .arm-badge {
         font-size: 16px;
         font-weight: bold;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
+        letter-spacing: 0.05em;
         padding: 6px 16px;
         border-radius: 9999px;
         color: #0a0a0f;
@@ -104,11 +153,34 @@
         margin: 0;
       }
 
+      /* --- タスク ---------------------------------------------------- */
+
+      .task-card {
+        width: min(1000px, 100%);
+        background: #1a1a2e;
+        border-radius: 16px;
+        padding: 28px 36px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        align-items: center;
+        text-align: center;
+      }
+      .task-label { font-size: 16px; color: #888; letter-spacing: 0.15em; }
+      .task-title {
+        font-size: 40px;
+        font-weight: bold;
+        color: #00e5ff;
+        text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
+        line-height: 1.4;
+      }
+      .task-description { font-size: 19px; color: #c8c8d8; line-height: 1.7; }
+      .task-prompt { font-size: 14px; color: #666; }
+
       .big-button {
-        font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+        font-family: inherit;
         font-size: 28px;
         font-weight: bold;
-        text-transform: uppercase;
         letter-spacing: 0.1em;
         padding: 20px 48px;
         margin: 10px;
@@ -153,7 +225,10 @@
         box-shadow: 0 0 12px rgba(136, 136, 136, 0.2);
       }
 
+      .buttons { display: flex; flex-wrap: wrap; justify-content: center; }
       form { display: inline; }
+
+      /* --- ストリーム状態 -------------------------------------------- */
 
       .camera-stats {
         background: #1a1a2e;
@@ -166,14 +241,13 @@
       }
       .camera-stats-title {
         font-size: 14px;
-        text-transform: uppercase;
         letter-spacing: 0.15em;
         color: #888;
         margin-bottom: 6px;
       }
       .stat-row {
         display: grid;
-        grid-template-columns: 110px 90px 1fr;
+        grid-template-columns: 130px 90px 1fr;
         gap: 12px;
         align-items: baseline;
         font-size: 16px;
@@ -188,115 +262,453 @@
       .stat-row.stale .cam-fps,
       .stat-row.stale .cam-jitter { color: #555; }
 
+      .stream-alert {
+        display: none;
+        color: #ff3355;
+        font-size: 16px;
+        font-weight: bold;
+        margin-top: 8px;
+      }
+
       .vr-stats { margin-top: 12px; }
       .vr-stats .cam-fps { color: #b388ff; }
+
+      /* Motor temperatures: left arm on the left, right arm on the right, so
+         the panel is laid out the way the operator faces the cell. */
+      .arm-temps { margin-top: 12px; min-width: 520px; }
+      .arm-temps .temp-sides { display: flex; gap: 28px; }
+      .arm-temps .temp-side { flex: 1; }
+      .arm-temps .temp-side-title {
+        font-size: 13px;
+        letter-spacing: 0.1em;
+        color: #aaa;
+        margin-bottom: 4px;
+      }
+      .arm-temps .temp-head,
+      .arm-temps .temp-row {
+        display: grid;
+        grid-template-columns: 48px 62px 62px 1fr;
+        gap: 8px;
+        align-items: baseline;
+        font-size: 15px;
+      }
+      .arm-temps .temp-head {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: #666;
+        margin-bottom: 2px;
+      }
+      .arm-temps .joint { color: #888; }
+      .arm-temps .mos,
+      .arm-temps .rotor {
+        font-weight: bold;
+        font-variant-numeric: tabular-nums;
+      }
+      /* 40 C and below green, 70 C and below yellow, above that red. */
+      .arm-temps .ok { color: #00e676; }
+      .arm-temps .warm { color: #ffcc00; }
+      .arm-temps .hot { color: #ff3355; }
+      .arm-temps .unknown { color: #555; }
+      .device-name { color: #666; font-size: 11px; margin-left: 8px; }
+
+      /* What the motor says about itself. DISABLED is torque off, not a
+         fault, so only codes the motor flags as errors are red. */
+      .arm-temps .mstatus { color: #666; font-size: 13px; }
+      .arm-temps .mstatus.enabled { color: #00e676; }
+      .arm-temps .mstatus.fault { color: #ff3355; font-weight: bold; }
+      .arm-temps .mstatus.silent { color: #ff9100; font-weight: bold; }
+
+      /* Bus state is a property of the whole interface: one badge per arm,
+         showing only the heaviest condition. */
+      .bus-badge {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        background: #222;
+        color: #888;
+      }
+      .bus-badge.ok { background: #06301c; color: #00e676; }
+      .bus-badge.warn { background: #33290a; color: #ffcc00; }
+      .bus-badge.error { background: #3a0d16; color: #ff3355; }
+
+      .cooldown-toast {
+        position: fixed;
+        bottom: 32px;
+        left: 50%;
+        transform: translateX(-50%) translateY(20px);
+        background: #1a1a2e;
+        color: #ffcc00;
+        border: 2px solid rgba(255, 204, 0, 0.5);
+        padding: 12px 28px;
+        border-radius: 9999px;
+        font-size: 16px;
+        font-weight: bold;
+        letter-spacing: 0.05em;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease, transform 0.15s ease;
+        box-shadow: 0 0 12px rgba(255, 204, 0, 0.25);
+      }
+      .cooldown-toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      /* --- 操作マニュアル -------------------------------------------- */
+
+      .manual {
+        width: min(1000px, 100%);
+        background: #12121f;
+        border-radius: 16px;
+        padding: 8px 28px;
+      }
+      .manual > summary {
+        cursor: pointer;
+        font-size: 20px;
+        font-weight: bold;
+        color: #00e5ff;
+        padding: 16px 0;
+        list-style: none;
+      }
+      .manual > summary::before { content: "📖 "; }
+      .manual-section { margin: 0 0 20px; }
+      .manual-section h3 {
+        font-size: 18px;
+        color: #ffcc00;
+        margin-bottom: 8px;
+      }
+      .manual-section ol, .manual-section ul {
+        padding-left: 1.6em;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .manual-section li { font-size: 17px; line-height: 1.7; color: #d8d8e4; }
+      .manual-note {
+        font-size: 15px;
+        color: #ffcc00;
+        background: rgba(255, 204, 0, 0.08);
+        border-left: 4px solid #ffcc00;
+        padding: 8px 12px;
+        margin-top: 8px;
+        line-height: 1.7;
+      }
     </style>
   </head>
   <body>
+    <div id="cooldown-toast" class="cooldown-toast">収録開始から間もないため、少し待ってから押してください</div>
+
+    {% if state.errors -%}
+      <div class="alert" id="error-panel">
+        <div class="alert-title">⚠ エラーが発生しています</div>
+        <div class="alert-hint">
+          収録を続ける前に内容を確認してください。解消しない場合は、下の内容を担当者に伝えてください。
+        </div>
+        <ul class="alert-list">
+          {% for error in state.errors | reverse -%}
+            <li>
+              <span class="meta mono">[{{ error.time }}] {{ error.source }}{% if error.count > 1 %} ×{{ error.count }}{% endif %}</span>
+              {{ error.message }}
+            </li>
+          {% endfor -%}
+        </ul>
+        <div class="alert-actions">
+          <form action="{{ url_for("_clear_errors") }}" method="post">
+            <input class="big-button quit" type="submit" value="エラー表示を消す">
+          </form>
+          <a class="big-button quit" href="{{ launcher_url }}log" target="_blank"
+             style="text-decoration: none;">詳しいログを見る</a>
+        </div>
+      </div>
+    {% endif -%}
+
+    <div class="alert" id="connection-lost">
+      <div class="alert-title">⚠ データ収集が停止しました</div>
+      <div class="alert-hint">
+        画面とデータ収集プログラムの接続が切れました。異常終了した可能性があります。<br>
+        起動画面に戻って内容を確認してください。
+      </div>
+      <div class="alert-actions">
+        <a class="big-button quit" href="{{ launcher_url }}"
+           style="text-decoration: none;">起動画面に戻る</a>
+      </div>
+    </div>
+
+    <div class="alert" id="ending-panel">
+      <div class="alert-title">終了しています…</div>
+      <div class="alert-hint" id="ending-hint">
+        収録データを保存してから、メニューに戻ります。しばらくお待ちください。
+      </div>
+      <div class="alert-actions" id="ending-actions" hidden>
+        <a class="big-button quit" href="{{ launcher_url }}"
+           style="text-decoration: none;">ランチャーの状態を確認</a>
+      </div>
+    </div>
+
     <div class="top-row">
       <div class="episode">
-        Episode: {{ state.episode_number }}
+        エピソード: <span class="mono">{{ state.episode_number }}</span>
       </div>
 
       {% if state.collecting -%}
-        <div class="status collecting">Collecting</div>
+        <div class="status collecting">収録中</div>
       {% else -%}
-        <div class="status idle">Idle</div>
+        <div class="status idle">待機中</div>
       {% endif -%}
     </div>
 
     <div class="arm-row">
-      <div class="arm-label">Arm</div>
-      <div class="arm-badge {{ state.arm_status_left }}">L: {{ state.arm_status_left | upper }}</div>
-      <div class="arm-badge {{ state.arm_status_right }}">R: {{ state.arm_status_right | upper }}</div>
+      <div class="arm-label">アーム</div>
+      <div class="arm-badge {{ state.arm_status_left }}">左: {{ ARM_STATUS_JA.get(state.arm_status_left, state.arm_status_left) }}</div>
+      <div class="arm-badge {{ state.arm_status_right }}">右: {{ ARM_STATUS_JA.get(state.arm_status_right, state.arm_status_right) }}</div>
       {% if state.arm_status_right == "stopped" and state.arm_status_left == "stopped" -%}
         <form id="arm-start-form" action="{{ url_for("_arm_start") }}" method="post">
-          <input class="big-button start arm-toggle" type="submit" value="Start Arm">
+          <input class="big-button start arm-toggle" type="submit" value="アーム起動">
         </form>
       {% else -%}
         <form id="arm-stop-form" action="{{ url_for("_arm_stop") }}" method="post">
-          <input class="big-button finish arm-toggle" type="submit" value="Pause Arm">
+          <input class="big-button finish arm-toggle" type="submit" value="アーム停止">
         </form>
       {% endif -%}
     </div>
 
-    <div class="task">Task: {{ state.task_index }}</div>
-    <div>({{ state.task_title }})</div>
+    <div class="task-card">
+      <div class="task-label">タスク <span class="mono">{{ state.task_index }}</span></div>
+      <div class="task-title">{{ state.task_title }}</div>
+      {% if state.task_description -%}
+        <div class="task-description">{{ state.task_description }}</div>
+      {% endif -%}
+      {% if state.task_prompt and state.task_prompt != state.task_title -%}
+        <div class="task-prompt">{{ state.task_prompt }}</div>
+      {% endif -%}
+    </div>
 
-    {% if state.collecting -%}
-      <form id="finish-form" action="{{ url_for("_success") }}" method="post">
-        <input class="big-button finish" type="submit" value="Success!">
-      </form>
+    <div class="buttons">
+      {% if state.collecting -%}
+        <form id="finish-form" action="{{ url_for("_success") }}" method="post">
+          <input class="big-button start" type="submit" value="成功で終了">
+        </form>
 
-      <form id="fail-form" action="{{ url_for("_fail") }}" method="post">
-        <input class="big-button finish" type="submit" value="Fail!">
-      </form>
+        <form id="fail-form" action="{{ url_for("_fail") }}" method="post">
+          <input class="big-button finish" type="submit" value="失敗で終了">
+        </form>
 
-      <form id="cancel-form" action="{{ url_for("_cancel") }}" method="post">
-        <input class="big-button finish" type="submit" value="Cancel!">
-      </form>
-    {% else -%}
-      <form id="start-form" action="{{ url_for("_start") }}" method="post">
-        <input class="big-button start" type="submit" value="Start!">
-      </form>
-      <form id="skip-form" action="{{ url_for("_skip") }}" method="post">
-        <input class="big-button start" type="submit" value="Skip task">
-      </form>
-    {% endif -%}
+        <form id="cancel-form" action="{{ url_for("_cancel") }}" method="post">
+          <input class="big-button quit" type="submit" value="取り消し">
+        </form>
+      {% else -%}
+        <form id="start-form" action="{{ url_for("_start") }}" method="post">
+          <input class="big-button start" type="submit" value="スタート">
+        </form>
+        <form id="skip-form" action="{{ url_for("_skip") }}" method="post">
+          <input class="big-button quit" type="submit" value="このタスクを飛ばす">
+        </form>
+      {% endif -%}
+    </div>
 
-    <div class="camera-stats">
-      <div class="camera-stats-title">Camera streams</div>
+    <div class="camera-stats" id="camera-panel" hidden>
+      <div class="camera-stats-title">カメラ映像</div>
       <div class="stat-row stale" data-cam="camera_wrist_right">
-        <span class="cam-name">wrist R</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">手首（右）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_wrist_left">
-        <span class="cam-name">wrist L</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">手首（左）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_head_left">
-        <span class="cam-name">head L</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">頭部（左）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_head_right">
-        <span class="cam-name">head R</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">頭部（右）</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
       </div>
       <div class="stat-row stale" data-cam="camera_ceiling">
-        <span class="cam-name">ceiling</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+        <span class="cam-name">天井</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
+      </div>
+      <div class="stream-alert" id="camera-alert">
+        ⚠ 映像が届いていないカメラがあります（USB を確認してください）
       </div>
     </div>
 
-    <div class="camera-stats vr-stats">
-      <div class="camera-stats-title">VR stream (raw UDP)</div>
-      <div class="stat-row stale" data-vr="vr_rx">
-        <span class="cam-name">VR</span>
-        <span class="cam-fps">-- Hz</span>
-        <span class="cam-jitter">Δ -- ms</span>
+    <div class="camera-stats vr-stats" id="ker-panel" hidden>
+      <div class="camera-stats-title">
+        リーダー（KER）<span class="device-name"></span>
+      </div>
+      <div class="stat-row stale" data-ker="ker_rx">
+        <span class="cam-name">KER</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">&Delta; -- ms</span>
       </div>
     </div>
+
+    <div class="camera-stats vr-stats" id="vr-panel" hidden>
+      <div class="camera-stats-title">VR ストリーム（UDP）</div>
+      <div class="stat-row stale" data-vr="vr_rx">
+        <span class="cam-name">VR</span>
+        <span class="cam-fps mono">-- Hz</span>
+        <span class="cam-jitter mono">Δ -- ms</span>
+      </div>
+    </div>
+
+    <div class="camera-stats arm-temps" id="arm-health-panel" hidden>
+      <div class="camera-stats-title">モーター温度・状態</div>
+      <div class="temp-sides">
+        {% for side in ["left", "right"] -%}
+        <div class="temp-side" data-arm="{{ side }}">
+          <div class="temp-side-title">
+            {{ "左" if side == "left" else "右" }}<span class="bus-badge">BUS --</span>
+          </div>
+          <div class="temp-head">
+            <span>関節</span><span>MOS</span><span>ローター</span><span>状態</span>
+          </div>
+          <div class="temp-rows"></div>
+        </div>
+        {% endfor -%}
+      </div>
+    </div>
+
+    {% if manual -%}
+      <details class="manual">
+        <summary>{{ manual.title | default("操作マニュアル") }}</summary>
+        {% for section in manual.sections -%}
+          <div class="manual-section">
+            <h3>{{ section.title }}</h3>
+            {% if section.steps -%}
+              <ol>
+                {% for step in section.steps -%}
+                  <li>{{ step }}</li>
+                {% endfor -%}
+              </ol>
+            {% endif -%}
+            {% if section.bullets -%}
+              <ul>
+                {% for bullet in section.bullets -%}
+                  <li>{{ bullet }}</li>
+                {% endfor -%}
+              </ul>
+            {% endif -%}
+            {% if section.note -%}
+              <div class="manual-note">{{ section.note }}</div>
+            {% endif -%}
+          </div>
+        {% endfor -%}
+      </details>
+    {% endif -%}
 
     {% if state.running -%}
       <form id="quit-form" action="{{ url_for("_quit") }}" method="post">
-        <input class="big-button quit" type="submit" value="Quit">
+        <input class="big-button quit" type="submit" value="終了">
       </form>
     {% endif -%}
 
     <script>
+      const LAUNCHER_URL = "{{ launcher_url }}";
+      const LAUNCHER_SESSION_ID = {{ launcher_session_id_json | safe }};
       const LONG_PRESS_MS = 1000;
+      // A start->finish toggle is two separate <form> submits (page
+      // navigations, since these POST and 303-redirect), so we can't just
+      // debounce the keypress -- we need to remember when recording
+      // started and refuse to finish too soon after. sessionStorage
+      // survives the navigation between the two within the same tab.
+      const MIN_RECORDING_MS = 1000;
+      const RECORDING_STARTED_KEY = "collectingStartedAt";
       let skipTimer = null;
       let cancelTimer = null;
       let armTimer = null;
+      let cooldownToastTimer = null;
       const focusableElements = [...document.querySelectorAll('input')];
 
+      function getRecordingStartedAt() {
+        return Number(sessionStorage.getItem(RECORDING_STARTED_KEY) || 0);
+      }
+
+      function setRecordingStartedAt(timestamp) {
+        sessionStorage.setItem(RECORDING_STARTED_KEY, String(timestamp));
+      }
+
+      function recordingTooShort() {
+        return Date.now() - getRecordingStartedAt() < MIN_RECORDING_MS;
+      }
+
+      function showCooldownToast() {
+        const toast = document.getElementById("cooldown-toast");
+        if (!toast) return;
+        toast.classList.add("show");
+        clearTimeout(cooldownToastTimer);
+        cooldownToastTimer = setTimeout(() => toast.classList.remove("show"), 800);
+      }
+
+      async function requestQuit(confirmFirst) {
+        if (window.quitRequestPending) return;
+        if (confirmFirst && !window.confirm("現在のデータ収集を終了しますか？")) return;
+
+        window.quitRequestPending = true;
+        const form = document.getElementById("quit-form");
+        if (form) {
+          const button = form.querySelector("input[type=submit]");
+          if (button) {
+            button.value = "終了しています…";
+            button.disabled = true;
+          }
+        }
+        document.getElementById("ending-panel").style.display = "flex";
+
+        try {
+          await fetch("/quit", {method: "POST"});
+        } catch (e) {
+          // The UI server shuts down after it sends the Dora quit command.
+        }
+
+        const deadline = Date.now() + 60000;
+        while (Date.now() < deadline) {
+          try {
+            const response = await fetch(LAUNCHER_URL + "status", {cache: "no-store"});
+            const status = await response.json();
+            if (status.session_id !== LAUNCHER_SESSION_ID) {
+              window.location.href = LAUNCHER_URL;
+              return;
+            }
+            if (status.session_state === "idle" && !status.busy) {
+              window.location.href = LAUNCHER_URL + "menu";
+              return;
+            }
+            if (status.session_state === "error") {
+              window.location.href = LAUNCHER_URL;
+              return;
+            }
+          } catch (e) {
+            // Keep waiting while the launcher finishes process cleanup.
+          }
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        document.getElementById("ending-hint").textContent =
+          "終了処理に時間がかかっています。ランチャーで状態を確認してください。";
+        document.getElementById("ending-actions").hidden = false;
+      }
+
+      const quitForm = document.getElementById("quit-form");
+      if (quitForm) {
+        quitForm.addEventListener("submit", event => {
+          event.preventDefault();
+          requestQuit(true);
+        });
+      }
+
       document.addEventListener("keydown", function(event) {
-        if (event.repeat) return;
+        if (event.repeat || window.quitRequestPending) return;
 
         if (event.key.toLowerCase() === "c") {
           if (!skipTimer) {
@@ -352,14 +764,27 @@
       });
 
       document.addEventListener("keyup", (event) => {
+        if (window.quitRequestPending) return;
         if (event.key.toLowerCase() === "c") {
           if (skipTimer) {
             clearTimeout(skipTimer);
             skipTimer = null;
+
             const startForm = document.getElementById("start-form");
-            if (startForm) startForm.submit();
             const finishForm = document.getElementById("finish-form");
-            if (finishForm) finishForm.submit();
+
+            if (finishForm) {
+              if (recordingTooShort()) {
+                showCooldownToast();
+                return;
+              }
+              finishForm.submit();
+            }
+
+            if (startForm) {
+              setRecordingStartedAt(Date.now());
+              startForm.submit();
+            }
           }
         }
 
@@ -370,7 +795,7 @@
             clearTimeout(armTimer);
             armTimer = null;
             const quitForm = document.getElementById("quit-form");
-            if (quitForm) quitForm.submit();
+            if (quitForm) requestQuit(false);
           }
         }
 
@@ -379,7 +804,13 @@
             clearTimeout(cancelTimer);
             cancelTimer = null;
             const failForm = document.getElementById("fail-form");
-            if (failForm) failForm.submit();
+            if (failForm) {
+              if (recordingTooShort()) {
+                showCooldownToast();
+                return;
+              }
+              failForm.submit();
+            }
           }
         }
       });
@@ -389,6 +820,42 @@
         location.reload();
       };
 
+      // The dataflow dying takes this page's event stream with it. Tell the
+      // operator on screen instead of leaving a silently frozen page.
+      const CONNECTION_LOST_AFTER_MS = 4000;
+      let connectionLostTimer = null;
+
+      eventSource.onopen = () => {
+        clearTimeout(connectionLostTimer);
+        connectionLostTimer = null;
+        document.getElementById("connection-lost").style.display = "none";
+      };
+
+      eventSource.onerror = () => {
+        if (connectionLostTimer) return;
+        connectionLostTimer = setTimeout(async () => {
+          connectionLostTimer = null;
+          if (eventSource.readyState === EventSource.OPEN) return;
+          if (window.quitRequestPending) return;
+          document.getElementById("connection-lost").style.display = "flex";
+          // The launcher outlives the dataflow: it holds the failure detail.
+          try {
+            const status = await (await fetch(LAUNCHER_URL + "status",
+                                              {cache: "no-store"})).json();
+            if (status.session_id === LAUNCHER_SESSION_ID &&
+                status.session_state === "idle" && !status.busy) {
+              window.location.href = LAUNCHER_URL + "menu";
+            } else if (status.session_state === "error" ||
+                       (!status.session_state &&
+                        (status.state === "error" || status.state === "stopped"))) {
+              window.location.href = LAUNCHER_URL;
+            }
+          } catch (e) {
+            // No launcher (started by hand): keep showing the banner.
+          }
+        }, CONNECTION_LOST_AFTER_MS);
+      };
+
       const FPS_ERROR = 20;
       const JITTER_WARN_MS = 10;
       const JITTER_ERROR_MS = 30;
@@ -396,6 +863,14 @@
       const statsSource = new EventSource("/stats");
       statsSource.onmessage = (e) => {
         const stats = JSON.parse(e.data);
+        // Only the cameras this dataflow wired are reported; the rest of
+        // the rows stay hidden instead of reading "-- Hz" forever.
+        for (const row of document.querySelectorAll("[data-cam]")) {
+          row.hidden = !(row.dataset.cam in stats);
+        }
+        document.getElementById("camera-panel").hidden =
+          Object.keys(stats).length === 0;
+        let stale = 0;
         for (const [cam, s] of Object.entries(stats)) {
           const row = document.querySelector(`[data-cam="${cam}"]`);
           if (!row) continue;
@@ -406,6 +881,7 @@
             jitterEl.textContent = "Δ -- ms";
             row.classList.add("stale");
             row.classList.remove("warn", "error");
+            stale += 1;
             continue;
           }
           row.classList.remove("stale");
@@ -416,6 +892,8 @@
           row.classList.toggle("error", isError);
           row.classList.toggle("warn", isWarn);
         }
+        document.getElementById("camera-alert").style.display =
+          stale > 0 ? "block" : "none";
       };
 
       const VR_FPS_ERROR = 50;        // expect ~72 Hz from the headset
@@ -425,6 +903,7 @@
       const vrStatsSource = new EventSource("/vr-stats");
       vrStatsSource.onmessage = (e) => {
         const s = JSON.parse(e.data);
+        document.getElementById("vr-panel").hidden = !s.present;
         const row = document.querySelector('[data-vr="vr_rx"]');
         if (!row) return;
         const fpsEl = row.querySelector(".cam-fps");
@@ -443,6 +922,138 @@
         const isWarn = !isError && s.jitter_ms > VR_JITTER_WARN_MS;
         row.classList.toggle("error", isError);
         row.classList.toggle("warn", isWarn);
+      };
+
+      const KER_FPS_ERROR = 100;      // the leader is driven at 250 Hz
+      const KER_JITTER_WARN_MS = 10;
+      const KER_JITTER_ERROR_MS = 30;
+
+      const kerStatsSource = new EventSource("/ker-stats");
+      kerStatsSource.onmessage = (e) => {
+        const s = JSON.parse(e.data);
+        document.getElementById("ker-panel").hidden = !s.present;
+        const row = document.querySelector('[data-ker="ker_rx"]');
+        if (!row) return;
+        const name = document.querySelector("#ker-panel .device-name");
+        // Sent once at startup, so it is absent for a UI that connected
+        // later. The panel is worth showing either way.
+        if (name && s.device && (s.device.hw || s.device.fw)) {
+          name.textContent =
+            "hw " + (s.device.hw ?? "?") + " / fw " + (s.device.fw ?? "?");
+        }
+        const fpsEl = row.querySelector(".cam-fps");
+        const jitterEl = row.querySelector(".cam-jitter");
+        if (!s || s.fps <= 0) {
+          fpsEl.textContent = "-- Hz";
+          jitterEl.textContent = "\u0394 -- ms";
+          row.classList.add("stale");
+          row.classList.remove("warn", "error");
+          return;
+        }
+        row.classList.remove("stale");
+        fpsEl.textContent = s.fps.toFixed(1) + " Hz";
+        jitterEl.textContent = "\u0394 " + s.jitter_ms.toFixed(1) + " ms";
+        const isError = s.fps < KER_FPS_ERROR || s.jitter_ms > KER_JITTER_ERROR_MS;
+        const isWarn = !isError && s.jitter_ms > KER_JITTER_WARN_MS;
+        row.classList.toggle("error", isError);
+        row.classList.toggle("warn", isWarn);
+      };
+
+      const TEMP_OK_MAX = 40;    // up to here green
+      const TEMP_WARM_MAX = 70;  // up to here yellow, above it red
+
+      const tempClass = (c) =>
+        c <= TEMP_OK_MAX ? "ok" : c <= TEMP_WARM_MAX ? "warm" : "hot";
+
+      const setTemp = (cell, celsius) => {
+        if (!cell) return;
+        cell.classList.remove("ok", "warm", "hot", "unknown");
+        if (celsius === undefined || celsius === null) {
+          cell.textContent = "--";
+          cell.classList.add("unknown");
+          return;
+        }
+        cell.textContent = celsius + "°C";
+        cell.classList.add(tempClass(celsius));
+      };
+
+      // DISABLED is torque off, not a fault; only the motor's own error
+      // codes and a motor that stopped answering are worth a colour.
+      const NORMAL_MOTOR_STATUS = ["ENABLED", "DISABLED"];
+
+      const setMotorStatus = (cell, status) => {
+        if (!cell) return;
+        cell.classList.remove("enabled", "fault", "silent");
+        if (!status) {
+          cell.textContent = "--";
+          return;
+        }
+        cell.textContent = status;
+        if (status === "SILENT") cell.classList.add("silent");
+        else if (status === "ENABLED") cell.classList.add("enabled");
+        else if (!NORMAL_MOTOR_STATUS.includes(status)) cell.classList.add("fault");
+      };
+
+      const setBusBadge = (panel, bus) => {
+        const badge = panel.querySelector(".bus-badge");
+        if (!badge || !bus) return;
+        badge.classList.remove("ok", "warn", "error");
+        badge.textContent =
+          "BUS " + bus.state + (bus.count > 0 ? " \u00d7" + bus.count : "");
+        if (bus.severity !== "unknown") badge.classList.add(bus.severity);
+      };
+
+      // Joints are named from the data rather than baked into the page. The
+      // last axis is always the gripper -- OpenArm's motor count is fixed
+      // whether it is driven in POS_FORCE or MIT mode, so this does not
+      // depend on which.
+      const jointLabel = (i, count) => (i === count - 1 ? "GRIP" : "J" + (i + 1));
+
+      const syncRows = (panel, count) => {
+        const host = panel.querySelector(".temp-rows");
+        if (host.children.length === count) return;
+        host.replaceChildren();
+        for (let i = 0; i < count; i++) {
+          const row = document.createElement("div");
+          row.className = "temp-row";
+          row.dataset.joint = i;
+          row.innerHTML =
+            '<span class="joint"></span>' +
+            '<span class="mos unknown">--</span>' +
+            '<span class="rotor unknown">--</span>' +
+            '<span class="mstatus">--</span>';
+          row.querySelector(".joint").textContent = jointLabel(i, count);
+          host.append(row);
+        }
+      };
+
+      const armHealthSource = new EventSource("/arm-health");
+      armHealthSource.onmessage = (e) => {
+        const health = JSON.parse(e.data);
+        const anyPresent = Object.values(health).some((s) => s.present);
+        document.getElementById("arm-health-panel").hidden = !anyPresent;
+        for (const [side, s] of Object.entries(health)) {
+          const panel = document.querySelector(`[data-arm="${side}"]`);
+          if (!panel) continue;
+          panel.hidden = !s.present;
+          const count = Math.max(
+            s.mos?.length ?? 0,
+            s.motor_status?.length ?? 0,
+          );
+          syncRows(panel, count);
+          setBusBadge(panel, s.bus);
+          for (const row of panel.querySelectorAll(".temp-row")) {
+            const i = Number(row.dataset.joint);
+            const status = s.motor_status?.[i];
+            // A motor that stopped answering keeps its last reported
+            // temperature in the driver, so showing it would present a
+            // stale reading as a current one.
+            const silent = status === "SILENT";
+            setTemp(row.querySelector(".mos"), silent ? null : s.mos?.[i]);
+            setTemp(row.querySelector(".rotor"), silent ? null : s.rotor?.[i]);
+            setMotorStatus(row.querySelector(".mstatus"), status);
+          }
+        }
       };
     </script>
   </body>

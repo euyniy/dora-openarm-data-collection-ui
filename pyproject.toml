@@ -14,7 +14,7 @@
 
 [project]
 name = "dora-openarm-data-collection-ui"
-version = "0.2.0"
+version = "0.4.0"
 authors = [{ name = "Enactic, Inc." }]
 description = "dora-rs node that provides UI to control data collection with OpenArm"
 license = { text = "Apache-2.0" }
@@ -22,7 +22,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 dependencies = [
-  "dora-rs >= 0.3.9",
+  "dora-rs >= 0.5.0",
   "fastapi[standard]",
   "uvicorn",
 ]
@@ -37,6 +37,7 @@ dora-openarm-data-collection-ui = "dora_openarm_data_collection_ui.main:main"
 
 [dependency-groups]
 dev = [
+  "dora-rs-cli >= 0.5.0",
   "pytest >= 8.1.1",
   "ruff == 0.14.11", # sync with .pre-commit-config.yaml
 ]
