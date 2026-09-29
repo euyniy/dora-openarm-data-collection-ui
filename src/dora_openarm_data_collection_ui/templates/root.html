@@ -616,6 +616,58 @@
     <script>
       const LAUNCHER_URL = "{{ launcher_url }}";
       const LAUNCHER_SESSION_ID = {{ launcher_session_id_json | safe }};
+      const EMBEDDED = window.parent !== window;
+      let parentOrigin = null;
+      window.addEventListener("message", event => {
+        if (EMBEDDED && event.source === window.parent &&
+            event.data?.type === "openarm:connected" &&
+            event.data?.session_id === LAUNCHER_SESSION_ID) {
+          parentOrigin = event.origin;
+        }
+      });
+
+      function requestParentEnd() {
+        if (parentOrigin) {
+          window.parent.postMessage({type: "openarm:end", session_id: LAUNCHER_SESSION_ID}, parentOrigin);
+        }
+      }
+
+      // Embedded task actions must not add entries to the browser's Back stack.
+      async function submitAction(form) {
+        if (!EMBEDDED) {
+          form.submit();
+          return;
+        }
+        if (form.id === "quit-form") {
+          requestParentEnd();
+          return;
+        }
+        if (window.actionPending) return;
+        window.actionPending = true;
+        try {
+          const response = await fetch(form.action, {method: "POST", body: new FormData(form)});
+          if (!response.ok) throw new Error("Action failed");
+          location.replace(response.url);
+        } catch (error) {
+          window.actionPending = false;
+          window.alert("操作を確認できませんでした。画面の状態を確認してください。");
+        }
+      }
+
+      if (EMBEDDED) {
+        document.addEventListener("submit", event => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          submitAction(event.target);
+        }, true);
+        document.addEventListener("click", event => {
+          const link = event.target.closest("a");
+          if (link && link.target !== "_blank") {
+            event.preventDefault();
+            requestParentEnd();
+          }
+        });
+      }
       const LONG_PRESS_MS = 1000;
       // A start->finish toggle is two separate <form> submits (page
       // navigations, since these POST and 303-redirect), so we can't just
@@ -651,6 +703,10 @@
       }
 
       async function requestQuit(confirmFirst) {
+        if (EMBEDDED) {
+          requestParentEnd();
+          return;
+        }
         if (window.quitRequestPending) return;
         if (confirmFirst && !window.confirm("現在のデータ収集を終了しますか？")) return;
 
@@ -715,7 +771,7 @@
             skipTimer = setTimeout(() => {
               skipTimer = null;
               const skipForm = document.getElementById("skip-form");
-              if (skipForm) skipForm.submit();
+              if (skipForm) submitAction(skipForm);
             }, LONG_PRESS_MS);
           }
         }
@@ -729,7 +785,7 @@
               const armForm =
                 document.getElementById("arm-start-form") ||
                 document.getElementById("arm-stop-form");
-              if (armForm) armForm.submit();
+              if (armForm) submitAction(armForm);
             }, LONG_PRESS_MS);
           }
         }
@@ -740,7 +796,7 @@
             cancelTimer = setTimeout(() => {
               cancelTimer = null;
               const cancelForm = document.getElementById("cancel-form");
-              if (cancelForm) cancelForm.submit();
+              if (cancelForm) submitAction(cancelForm);
             }, LONG_PRESS_MS);
           }
         }
@@ -758,7 +814,7 @@
           const active = document.activeElement;
           const form = active.closest('form');
           if (form) {
-            form.submit();
+            submitAction(form);
           }
         }
       });
@@ -778,12 +834,12 @@
                 showCooldownToast();
                 return;
               }
-              finishForm.submit();
+              submitAction(finishForm);
             }
 
             if (startForm) {
               setRecordingStartedAt(Date.now());
-              startForm.submit();
+              submitAction(startForm);
             }
           }
         }
@@ -809,7 +865,7 @@
                 showCooldownToast();
                 return;
               }
-              failForm.submit();
+              submitAction(failForm);
             }
           }
         }
@@ -836,6 +892,7 @@
         connectionLostTimer = setTimeout(async () => {
           connectionLostTimer = null;
           if (eventSource.readyState === EventSource.OPEN) return;
+          if (EMBEDDED) return; // The mode page owns session status and navigation.
           if (window.quitRequestPending) return;
           document.getElementById("connection-lost").style.display = "flex";
           // The launcher outlives the dataflow: it holds the failure detail.
