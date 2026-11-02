@@ -273,6 +273,88 @@
       .vr-stats { margin-top: 12px; }
       .vr-stats .cam-fps { color: #b388ff; }
 
+      /* --- カメラ映像（ライブ） ------------------------------------- */
+
+      /* The task and the cameras side by side, so the operator reads the
+         task while watching the scene. They stack on a narrow screen. */
+      .task-row {
+        width: min(1400px, 100%);
+        display: flex;
+        gap: 20px;
+        align-items: stretch;
+      }
+      .task-row .task-card { width: auto; flex: 1 1 0; justify-content: center; }
+      @media (max-width: 1100px) {
+        .task-row { flex-direction: column; }
+      }
+
+      /* The ceiling shows the whole scene, so it gets the full width; the
+         tabbed pair (head or wrist) sits side by side below. */
+      .camera-view {
+        flex: 1.2 1 0;
+        min-width: 0;
+        background: #1a1a2e;
+        padding: 16px 24px;
+        border-radius: 12px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        align-content: start;
+        gap: 12px;
+      }
+      .camera-view-head {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .camera-view-head .camera-stats-title { margin-bottom: 0; }
+      .camera-tabs { display: flex; gap: 4px; }
+      .camera-tab {
+        background: #0a0a0f;
+        color: #888;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 6px 18px;
+        font: inherit;
+        font-size: 15px;
+        cursor: pointer;
+      }
+      .camera-tab:disabled { opacity: 0.3; cursor: default; }
+      .camera-tab .tab-warn { color: #ffcc00; margin-left: 6px; }
+      #camera-view[data-group="head"] .camera-tab[data-tab="head"],
+      #camera-view[data-group="wrist"] .camera-tab[data-tab="wrist"] {
+        color: #00e5ff;
+        border-color: #00e5ff;
+      }
+      /* Only the picked pair is shown (and sent); the ceiling always is. */
+      #camera-view[data-group="head"] .camera-tile[data-group="wrist"],
+      #camera-view[data-group="wrist"] .camera-tile[data-group="head"] {
+        display: none;
+      }
+      .camera-tile { position: relative; display: flex; flex-direction: column; gap: 4px; }
+      .camera-tile.ceiling { grid-column: 1 / -1; }
+      .camera-tile .cam-name { font-size: 13px; letter-spacing: 0.1em; color: #888; }
+      .camera-tile .frame {
+        position: relative;
+        background: #000;
+        border-radius: 8px;
+        overflow: hidden;
+        aspect-ratio: 16 / 9;
+      }
+      .camera-tile.ceiling .frame { aspect-ratio: 16 / 10; }
+      .camera-tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
+      .camera-tile .no-signal {
+        display: none;
+        position: absolute;
+        inset: 0;
+        align-items: center;
+        justify-content: center;
+        color: #555;
+        font-size: 18px;
+      }
+      .camera-tile.stale img { opacity: 0.25; }
+      .camera-tile.stale .no-signal { display: flex; }
+
       /* Motor temperatures: left arm on the left, right arm on the right, so
          the panel is laid out the way the operator faces the cell. */
       .arm-temps { margin-top: 12px; min-width: 520px; }
@@ -476,14 +558,67 @@
       {% endif -%}
     </div>
 
-    <div class="task-card">
-      <div class="task-label">タスク <span class="mono">{{ state.task_index }}</span></div>
-      <div class="task-title">{{ state.task_title }}</div>
-      {% if state.task_description -%}
-        <div class="task-description">{{ state.task_description }}</div>
-      {% endif -%}
-      {% if state.task_prompt and state.task_prompt != state.task_title -%}
-        <div class="task-prompt">{{ state.task_prompt }}</div>
+    <div class="task-row">
+      <div class="task-card">
+        <div class="task-label">タスク <span class="mono">{{ state.task_index }}</span></div>
+        <div class="task-title">{{ state.task_title }}</div>
+        {% if state.task_description -%}
+          <div class="task-description">{{ state.task_description }}</div>
+        {% endif -%}
+        {% if state.task_prompt and state.task_prompt != state.task_title -%}
+          <div class="task-prompt">{{ state.task_prompt }}</div>
+        {% endif -%}
+      </div>
+
+      {% if camera_view_enabled -%}
+      <div class="camera-view" id="camera-view"
+           data-group="{{ camera_view_default_group }}"{% if not camera_view_status %} hidden{% endif %}>
+        <div class="camera-view-head">
+          <div class="camera-stats-title">カメラ映像（ライブ）</div>
+          <div class="camera-tabs" role="tablist">
+            {% for group, label in [("head", "頭部"), ("wrist", "手首")] -%}
+            {% set tab = namespace(wired=false, warn=false) -%}
+            {% for cam in camera_view_groups[group] -%}
+              {% if cam in camera_view_status -%}
+                {% set tab.wired = true -%}
+                {% if not camera_view_status[cam] %}{% set tab.warn = true %}{% endif -%}
+              {% endif -%}
+            {% endfor -%}
+            <button type="button" class="camera-tab" role="tab" data-tab="{{ group }}"
+                    data-cams="{{ camera_view_groups[group] | join(" ") }}"
+                    {%- if not tab.wired %} disabled{% endif %}>
+              {{ label }}<span class="tab-warn"{% if not tab.warn %} hidden{% endif %}>⚠</span>
+            </button>
+            {% endfor -%}
+          </div>
+        </div>
+        {% for cam, label, group in [
+          ("camera_ceiling", "天井", "ceiling"),
+          ("camera_head_left", "頭部（左）", "head"),
+          ("camera_head_right", "頭部（右）", "head"),
+          ("camera_wrist_left", "手首（左）", "wrist"),
+          ("camera_wrist_right", "手首（右）", "wrist"),
+        ] -%}
+        <div class="camera-tile {{ "ceiling" if group == "ceiling" else "pair" }}{% if camera_view_status.get(cam) == false %} stale{% endif %}"
+             data-cam-view="{{ cam }}" data-group="{{ group }}"{% if cam not in camera_view_status %} hidden{% endif %}>
+          <span class="cam-name">{{ label }}</span>
+          <div class="frame">
+            <img alt="{{ label }}">
+            <div class="no-signal">映像なし</div>
+          </div>
+        </div>
+        {% endfor -%}
+      </div>
+      <script>
+        // Before the first paint, so the reload after every state change
+        // does not flash the default tab.
+        try {
+          const group = sessionStorage.getItem("cameraViewGroup");
+          if (group === "head" || group === "wrist") {
+            document.getElementById("camera-view").dataset.group = group;
+          }
+        } catch (e) {}
+      </script>
       {% endif -%}
     </div>
 
@@ -952,6 +1087,99 @@
         document.getElementById("camera-alert").style.display =
           stale > 0 ? "block" : "none";
       };
+
+      // Live camera view: one WebSocket carries the ceiling and the picked
+      // pair (`?group=`) as `name\n<jpeg>` (binary), plus a JSON text
+      // message saying which cameras are live, the other pair included so
+      // its tab can show ⚠. Only that message shows 映像なし: a camera is
+      // reported silent when this node stops receiving it, and nothing
+      // else -- a page reload, an arm starting, this socket reconnecting --
+      // changes a tile. Closed while the tab is hidden so a forgotten
+      // window does not keep decoding video next to the recorder.
+      if (document.getElementById("camera-view")) {
+        const cameraView = document.getElementById("camera-view");
+        const frameUrls = {};
+        const applyCameraStatus = (live) => {
+          let shown = 0;
+          for (const tile of document.querySelectorAll("[data-cam-view]")) {
+            const cam = tile.dataset.camView;
+            tile.hidden = !(cam in live);
+            if (tile.hidden) continue;
+            shown += 1;
+            tile.classList.toggle("stale", !live[cam]);
+          }
+          cameraView.hidden = shown === 0;
+          for (const tab of document.querySelectorAll(".camera-tab")) {
+            const cams = tab.dataset.cams.split(" ");
+            tab.disabled = !cams.some((cam) => cam in live);
+            tab.querySelector(".tab-warn").hidden =
+              !cams.some((cam) => cam in live && !live[cam]);
+          }
+        };
+        let cameraSocket = null;
+        let reconnectTimer = null;
+        const closeCameraSocket = () => {
+          clearTimeout(reconnectTimer);
+          if (cameraSocket) {
+            cameraSocket.onclose = null;
+            cameraSocket.close();
+            cameraSocket = null;
+          }
+        };
+        const openCameraSocket = () => {
+          if (cameraSocket || document.hidden) return;
+          const scheme = location.protocol === "https:" ? "wss" : "ws";
+          const group = encodeURIComponent(cameraView.dataset.group);
+          cameraSocket = new WebSocket(
+            `${scheme}://${location.host}/cameras?group=${group}`
+          );
+          cameraSocket.binaryType = "arraybuffer";
+          cameraSocket.onmessage = (e) => {
+            if (typeof e.data === "string") {
+              applyCameraStatus(JSON.parse(e.data));
+              return;
+            }
+            const bytes = new Uint8Array(e.data);
+            const split = bytes.indexOf(10);  // "\n"
+            if (split < 0) return;
+            const cam = new TextDecoder().decode(bytes.subarray(0, split));
+            const img = document.querySelector(`[data-cam-view="${cam}"] img`);
+            if (!img) return;
+            const url = URL.createObjectURL(
+              new Blob([bytes.subarray(split + 1)], { type: "image/jpeg" })
+            );
+            img.src = url;
+            if (frameUrls[cam]) URL.revokeObjectURL(frameUrls[cam]);
+            frameUrls[cam] = url;
+          };
+          cameraSocket.onclose = () => {
+            cameraSocket = null;
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(openCameraSocket, 1000);
+          };
+        };
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) {
+            closeCameraSocket();
+          } else {
+            openCameraSocket();
+          }
+        });
+        // Switching tabs reconnects, so the server only sends the pair that
+        // is on screen. The choice survives the page's reloads.
+        for (const tab of document.querySelectorAll(".camera-tab")) {
+          tab.addEventListener("click", () => {
+            if (tab.dataset.tab === cameraView.dataset.group) return;
+            cameraView.dataset.group = tab.dataset.tab;
+            try {
+              sessionStorage.setItem("cameraViewGroup", tab.dataset.tab);
+            } catch (e) {}
+            closeCameraSocket();
+            openCameraSocket();
+          });
+        }
+        openCameraSocket();
+      }
 
       const VR_FPS_ERROR = 50;        // expect ~72 Hz from the headset
       const VR_JITTER_WARN_MS = 10;

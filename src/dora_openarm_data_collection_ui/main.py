@@ -23,7 +23,7 @@ import datetime
 import dora
 import json
 from collections.abc import AsyncIterable
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
@@ -138,6 +138,43 @@ CAMERA_INPUTS = (
 
 CAMERA_TIMESTAMP_WINDOW = 60
 CAMERA_STALE_AFTER_S = 1.0
+
+# Cameras shown live to the operator. The ceiling is always shown; below it
+# the operator picks one pair with a tab. Only the ceiling and the picked
+# pair are sent, since every camera shown costs browser CPU on the same PC
+# that records.
+CAMERA_VIEW_ALWAYS = ("camera_ceiling",)
+CAMERA_VIEW_GROUPS = {
+    "head": ("camera_head_left", "camera_head_right"),
+    "wrist": ("camera_wrist_left", "camera_wrist_right"),
+}
+CAMERA_VIEW_DEFAULT_GROUP = "head"
+CAMERA_VIEW_INPUTS = CAMERA_VIEW_ALWAYS + tuple(
+    name for group in CAMERA_VIEW_GROUPS.values() for name in group
+)
+
+# The live view is a preview, so it is sent at a fraction of the camera rate
+# (see --camera-view-fps). 0 turns it off.
+camera_view_fps = 10.0
+
+# The newest JPEG of each viewed camera, kept as the Arrow array it arrived
+# in. It is only turned into bytes when a frame is actually sent, so storing
+# every 30 fps frame costs nothing.
+latest_frames: dict[str, pa.Array] = {}
+# Bumped on every stored frame, so a sender can tell a new frame from the
+# one it already sent.
+frame_seq: dict[str, int] = {name: 0 for name in CAMERA_VIEW_INPUTS}
+# When this node last got a frame from each viewed camera (time.monotonic()).
+# This is the time of receipt, not the frame's dora timestamp, so the event
+# loop falling behind (both arms report at 250 Hz once started) cannot make a
+# camera that is still delivering look disconnected.
+frame_received_at: dict[str, float] = {}
+# A tile shows 映像なし only once its camera has sent nothing for this long,
+# which is far longer than any gap a working camera at 30 fps leaves.
+CAMERA_VIEW_SILENT_AFTER_S = 2.0
+# How often /cameras repeats which cameras are live, so a tile turns to
+# 映像なし even though no frame will come to tell it.
+CAMERA_VIEW_STATUS_INTERVAL_S = 0.5
 
 # dora-openarm status inputs, one per arm. The input id matches the State field
 ARM_STATUS_INPUTS = ("arm_status_right", "arm_status_left")
@@ -287,6 +324,32 @@ def _update_camera_stats(event_id: str, ts_s: float) -> None:
         ts_s,
         CAMERA_STALE_AFTER_S,
     )
+
+
+def _store_camera_frame(event_id: str, value, metadata) -> None:
+    """Keep the newest frame of a viewed camera for /cameras."""
+    if event_id not in CAMERA_VIEW_INPUTS or camera_view_fps <= 0:
+        return
+    # Every robot module sends JPEG today; anything else would need decoding,
+    # which this node deliberately does not do.
+    if metadata.get("encoding", "jpeg") not in ("jpeg", "jpg", "jpe"):
+        return
+    latest_frames[event_id] = value
+    frame_seq[event_id] += 1
+    frame_received_at[event_id] = time.monotonic()
+
+
+def _camera_view_status() -> dict[str, bool]:
+    """Whether each viewed camera is delivering, keyed by input id.
+
+    A camera that never sent a frame is left out: this dataflow did not wire
+    it, so its tile stays hidden rather than reading 映像なし forever.
+    """
+    now = time.monotonic()
+    return {
+        name: now - received_at <= CAMERA_VIEW_SILENT_AFTER_S
+        for name, received_at in frame_received_at.items()
+    }
 
 
 def _update_arm_health(side: str, value) -> None:
@@ -509,6 +572,12 @@ def _root(request: Request):
             "state_version": state_version,
             "manual": manual,
             "launcher_url": launcher_url,
+            "camera_view_enabled": camera_view_fps > 0,
+            # Rendered into the tiles so that the reload after every state
+            # change (an arm starting, say) keeps them as they were.
+            "camera_view_status": _camera_view_status(),
+            "camera_view_groups": CAMERA_VIEW_GROUPS,
+            "camera_view_default_group": CAMERA_VIEW_DEFAULT_GROUP,
             "launcher_session_id_json": json.dumps(os.getenv("LAUNCHER_SESSION_ID") or ""),
         },
     )
@@ -670,6 +739,53 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
         await asyncio.sleep(0.5)
 
 
+@app.websocket("/cameras")
+async def _cameras(websocket: WebSocket):
+    """Push each viewed camera's newest frame and whether it is live.
+
+    `?group=` picks the pair sent besides the ceiling (CAMERA_VIEW_GROUPS);
+    the page reconnects when the operator switches tabs.
+
+    Frames are binary messages: the camera's name, a newline, the JPEG.
+    Every CAMERA_VIEW_STATUS_INTERVAL_S a text message carries
+    _camera_view_status() as JSON for every camera, including the pair not
+    shown, so the other tab can warn about a dead camera; it alone decides
+    映像なし.
+
+    One socket carries every camera: the page already holds five SSE
+    streams, and one MJPEG stream per camera would exhaust the browser's six
+    connections per host. Only the newest frame is ever sent, so a slow
+    browser skips frames instead of backing them up in this node, whose
+    event loop also serves the dora inputs.
+    """
+    await websocket.accept()
+    if camera_view_fps <= 0:
+        await websocket.close()
+        return
+    group = websocket.query_params.get("group", CAMERA_VIEW_DEFAULT_GROUP)
+    names = CAMERA_VIEW_ALWAYS + CAMERA_VIEW_GROUPS.get(
+        group, CAMERA_VIEW_GROUPS[CAMERA_VIEW_DEFAULT_GROUP]
+    )
+    sent = {name: 0 for name in names}
+    status_sent_at = 0.0
+    try:
+        while state.running:
+            now = time.monotonic()
+            if now - status_sent_at >= CAMERA_VIEW_STATUS_INTERVAL_S:
+                status_sent_at = now
+                await websocket.send_text(json.dumps(_camera_view_status()))
+            for name in names:
+                seq = frame_seq[name]
+                if seq == sent[name] or name not in latest_frames:
+                    continue
+                sent[name] = seq
+                jpeg = latest_frames[name].to_numpy(zero_copy_only=False).tobytes()
+                await websocket.send_bytes(name.encode() + b"\n" + jpeg)
+            await asyncio.sleep(1.0 / camera_view_fps)
+    except WebSocketDisconnect:
+        pass
+
+
 @app.post("/quit")
 async def _quit():
     launcher_notified = await _command_quit()
@@ -768,6 +884,7 @@ async def _main_dora(server):
                     event_id,
                     _event_ts_to_seconds(event["metadata"].get("timestamp")),
                 )
+                _store_camera_frame(event_id, event["value"], event["metadata"])
                 continue
             if event_id in ARM_STATUS_INPUTS:
                 value = event["value"][0].as_py()
@@ -829,6 +946,7 @@ def main():
     """Run data collection control Web application."""
     global node
     global tasks
+    global camera_view_fps
 
     parser = argparse.ArgumentParser(description="Record data as OpenArm dataset")
     parser.add_argument(
@@ -862,7 +980,14 @@ def main():
         default=os.getenv("LAUNCHER_URL", default_launcher_url),
         help=f"The desktop launcher URL to fall back to on failure ({default_launcher_url})",
     )
+    parser.add_argument(
+        "--camera-view-fps",
+        default=float(os.getenv("CAMERA_VIEW_FPS", camera_view_fps)),
+        help=f"Live camera view rate, 0 to disable ({camera_view_fps:g})",
+        type=float,
+    )
     args = parser.parse_args()
+    camera_view_fps = args.camera_view_fps
     global auto_open
     auto_open = args.auto_open
     global port

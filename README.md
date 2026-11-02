@@ -14,6 +14,7 @@ collection session.
 | `LAUNCHER_URL` | `--launcher-url` | Desktop launcher to fall back to when this dataflow dies (default `http://127.0.0.1:8080/`) |
 | `PORT` | `--port` | Port of this UI (default `8000`) |
 | `AUTO_OPEN` | `--auto-open` | Open a Web browser on start |
+| `CAMERA_VIEW_FPS` | `--camera-view-fps` | Rate of the live camera view (default `10`, `0` turns it off) |
 
 Tasks in the metadata may carry `prompt_ja` and `description_ja`. They are shown
 instead of `prompt` / `description`, which stay in English because the recorder
@@ -29,6 +30,20 @@ sections:
     bullets: ["...", "..."]   # unnumbered
     note: "..."               # highlighted warning
 ```
+
+## Live camera view
+
+The task screen shows the cameras live next to the task: `camera_ceiling`
+always, and below it either the head pair (`camera_head_left`,
+`camera_head_right`) or the wrist pair (`camera_wrist_left`,
+`camera_wrist_right`), picked with the 頭部 / 手首 tabs. A tab shows ⚠ when
+a camera of its pair stops, even while the other pair is on screen. A tile
+shows 映像なし once its camera has sent nothing for 2 s.
+
+Frames must be JPEG (`encoding` metadata `jpeg`, or none). They are forwarded
+as they are over one WebSocket (`/cameras?group=head|wrist`), newest frame
+only, at `CAMERA_VIEW_FPS`. Only the ceiling and the picked pair are sent, and
+the page closes the socket while its tab is hidden.
 
 ## Errors
 
