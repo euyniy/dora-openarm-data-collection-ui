@@ -24,7 +24,7 @@ import dora
 import json
 from collections.abc import AsyncIterable
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
 import os
@@ -51,6 +51,10 @@ launcher_url = "http://127.0.0.1:8080/"
 
 # Operation manual shown on the task screen (see --manual-file).
 manual = None
+
+# Where tasks[].reference_video files are (see --reference-video-dir).
+DEFAULT_REFERENCE_VIDEO_DIR = pathlib.Path("metadatas/task-reference")
+reference_video_dir = DEFAULT_REFERENCE_VIDEO_DIR
 
 
 # Browser openers, most specific first. "open" is macOS, "xdg-open" is Linux.
@@ -90,6 +94,12 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
+    # A video of the task done right (tasks[].reference_video): a URL, or the
+    # path of a file that /reference-video serves. Display only.
+    task_reference_video: str = ""
+    # The reference video named by the task but not found: shown as a quiet
+    # note, since recording works without it (the NAS may be unmounted).
+    task_reference_missing: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
     # Failures to show in red on the task screen: newest last.
@@ -478,6 +488,33 @@ def apply_task(index):
     state.task_title = task.get("prompt_ja") or task.get("prompt", "")
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
+    video = str(task.get("reference_video") or "").strip()
+    found = reference_video_file(task)
+    if _is_url(video):
+        state.task_reference_video = video
+    elif found:
+        # The index makes the browser load this task's video, not a cached one.
+        state.task_reference_video = f"/reference-video/{index}"
+    else:
+        state.task_reference_video = ""
+    state.task_reference_missing = video if video and not _is_url(video) and not found else ""
+
+
+def _is_url(value):
+    return value.startswith(("http://", "https://"))
+
+
+def reference_video_file(task):
+    """Return the file of a task's reference video, or None.
+
+    `reference_video` is a URL, which the browser plays as is, or a file name
+    in reference_video_dir, which /reference-video serves.
+    """
+    video = str(task.get("reference_video") or "").strip()
+    if not video or _is_url(video):
+        return None
+    path = reference_video_dir / video
+    return path if path.is_file() else None
 
 
 def next_task():
@@ -635,6 +672,15 @@ def _cancel(request: Request):
     state.collecting = False
     state.episode_number += 1
     return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.get("/reference-video/{index}")
+def _reference_video(index: int):
+    """Serve the reference video file of a task (seekable: Range requests work)."""
+    path = reference_video_file(tasks[index]) if 0 <= index < len(tasks) else None
+    if path is None:
+        return Response(status_code=404)
+    return FileResponse(path)
 
 
 @app.get("/events", response_class=EventSourceResponse)
@@ -974,6 +1020,12 @@ def main():
         help="The operation manual (YAML) shown on the task screen",
         type=pathlib.Path,
     )
+    parser.add_argument(
+        "--reference-video-dir",
+        default=os.getenv("REFERENCE_VIDEO_DIR") or DEFAULT_REFERENCE_VIDEO_DIR,
+        help=f"Where the tasks' reference videos are ({DEFAULT_REFERENCE_VIDEO_DIR})",
+        type=pathlib.Path,
+    )
     default_launcher_url = "http://127.0.0.1:8080/"
     parser.add_argument(
         "--launcher-url",
@@ -997,6 +1049,8 @@ def main():
     launcher_url = args.launcher_url.rstrip("/") + "/"
     global manual
     manual = load_manual(args.manual_file)
+    global reference_video_dir
+    reference_video_dir = args.reference_video_dir.expanduser()
     metadata = load_yaml(args.metadata_file)
     tasks = metadata["tasks"]
     apply_task(state.task_index)
