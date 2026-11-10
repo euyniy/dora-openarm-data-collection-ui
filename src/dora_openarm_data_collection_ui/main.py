@@ -52,9 +52,15 @@ launcher_url = "http://127.0.0.1:8080/"
 # Operation manual shown on the task screen (see --manual-file).
 manual = None
 
-# Where tasks[].reference_video files are (see --reference-video-dir).
+# Where the reference videos of the tasks are (see --reference-video-dir):
+# <dir>/<task set>/<task number from 1>/<any name>.mp4, or the file that
+# tasks[].reference_video names.
 DEFAULT_REFERENCE_VIDEO_DIR = pathlib.Path("metadatas/task-reference")
 reference_video_dir = DEFAULT_REFERENCE_VIDEO_DIR
+REFERENCE_VIDEO_SUFFIXES = (".mp4", ".m4v", ".webm", ".mov")
+# The id of the task set being recorded: the metadata's task_set, or the
+# metadata file's name.
+task_set = ""
 
 
 # Browser openers, most specific first. "open" is macOS, "xdg-open" is Linux.
@@ -489,7 +495,7 @@ def apply_task(index):
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
     video = str(task.get("reference_video") or "").strip()
-    found = reference_video_file(task)
+    found = reference_video_file(index)
     if _is_url(video):
         state.task_reference_video = video
     elif found:
@@ -504,17 +510,36 @@ def _is_url(value):
     return value.startswith(("http://", "https://"))
 
 
-def reference_video_file(task):
-    """Return the file of a task's reference video, or None.
+def reference_video_file(index):
+    """Return the file of the reference video of the task at `index`, or None.
 
-    `reference_video` is a URL, which the browser plays as is, or a file name
-    in reference_video_dir, which /reference-video serves.
+    A task's `reference_video` is a URL, which the browser plays as is, or a
+    file name in reference_video_dir. Without it, the first video file in
+    <reference_video_dir>/<task set>/<index + 1>/ is the task's, so a folder
+    of numbered folders gives every task of a set its video.
+    /reference-video serves the file.
     """
-    video = str(task.get("reference_video") or "").strip()
-    if not video or _is_url(video):
+    video = str(tasks[index].get("reference_video") or "").strip()
+    if _is_url(video):
         return None
-    path = reference_video_dir / video
-    return path if path.is_file() else None
+    if video:
+        path = reference_video_dir / video
+        return path if path.is_file() else None
+    folder = reference_video_dir / task_set / str(index + 1)
+    try:
+        files = sorted(folder.iterdir())
+    except OSError:
+        return None
+    return next(
+        (
+            path
+            for path in files
+            if path.suffix.lower() in REFERENCE_VIDEO_SUFFIXES
+            and not path.name.startswith(".")
+            and path.is_file()
+        ),
+        None,
+    )
 
 
 def next_task():
@@ -677,7 +702,7 @@ def _cancel(request: Request):
 @app.get("/reference-video/{index}")
 def _reference_video(index: int):
     """Serve the reference video file of a task (seekable: Range requests work)."""
-    path = reference_video_file(tasks[index]) if 0 <= index < len(tasks) else None
+    path = reference_video_file(index) if 0 <= index < len(tasks) else None
     if path is None:
         return Response(status_code=404)
     return FileResponse(path)
@@ -1052,6 +1077,8 @@ def main():
     global reference_video_dir
     reference_video_dir = args.reference_video_dir.expanduser()
     metadata = load_yaml(args.metadata_file)
+    global task_set
+    task_set = str(metadata.get("task_set") or args.metadata_file.stem)
     tasks = metadata["tasks"]
     apply_task(state.task_index)
 
