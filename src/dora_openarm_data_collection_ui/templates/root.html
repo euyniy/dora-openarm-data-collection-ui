@@ -192,6 +192,15 @@
         border-radius: 10px;
         background: #000;
       }
+      .task-reference-videos { width: 100%; text-align: center; }
+      /* Several reference videos: side by side, wrapping to more rows. */
+      .task-reference-grid {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 8px;
+      }
+      .task-reference-grid video { width: 100%; max-height: 240px; }
 
       .big-button {
         font-family: inherit;
@@ -584,12 +593,16 @@
         {% if state.task_prompt and state.task_prompt != state.task_title -%}
           <div class="task-prompt">{{ state.task_prompt }}</div>
         {% endif -%}
-        {% if state.task_reference_video -%}
+        {% if state.task_reference_videos -%}
           <div class="task-reference">
             <div class="task-reference-label">参考動画</div>
-            {# Muted so that the browser lets it autoplay. -#}
-            <video src="{{ state.task_reference_video }}" autoplay muted loop playsinline controls
-                   preload="auto"></video>
+            <div class="task-reference-videos{{ ' task-reference-grid' if state.task_reference_videos | length > 1 }}">
+            {% for video in state.task_reference_videos -%}
+              {# Muted so that the browser lets it autoplay. -#}
+              <video src="{{ video }}" autoplay muted loop playsinline controls
+                     preload="auto"></video>
+            {% endfor -%}
+            </div>
           </div>
         {% elif state.task_reference_missing -%}
           <div class="task-reference-missing">参考動画なし: {{ state.task_reference_missing }}</div>

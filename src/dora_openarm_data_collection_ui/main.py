@@ -32,6 +32,7 @@ import pathlib
 import pyarrow as pa
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uvicorn
 import yaml
@@ -100,9 +101,10 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
-    # A video of the task done right (tasks[].reference_video): a URL, or the
-    # path of a file that /reference-video serves. Display only.
-    task_reference_video: str = ""
+    # Videos of the task done right (tasks[].reference_video, or every video
+    # in the task's numbered folder): URLs, or paths that /reference-video
+    # serves. Several are tiled. Display only.
+    task_reference_videos: list = dataclasses.field(default_factory=list)
     # The reference video named by the task but not found: shown as a quiet
     # note, since recording works without it (the NAS may be unmounted).
     task_reference_missing: str = ""
@@ -495,51 +497,58 @@ def apply_task(index):
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
     video = str(task.get("reference_video") or "").strip()
-    found = reference_video_file(index)
+    found = reference_video_files(index)
     if _is_url(video):
-        state.task_reference_video = video
-    elif found:
-        # The index makes the browser load this task's video, not a cached one.
-        state.task_reference_video = f"/reference-video/{index}"
+        state.task_reference_videos = [video]
     else:
-        state.task_reference_video = ""
+        # The URL differs per file, so the browser never plays a cached video
+        # of another task set (or an older file) at the same index.
+        state.task_reference_videos = [
+            f"/reference-video/{index}/{number}?v="
+            + urllib.parse.quote(f"{task_set}/{path.name}/{_mtime(path)}")
+            for number, path in enumerate(found)
+        ]
     state.task_reference_missing = video if video and not _is_url(video) and not found else ""
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
 
 
 def _is_url(value):
     return value.startswith(("http://", "https://"))
 
 
-def reference_video_file(index):
-    """Return the file of the reference video of the task at `index`, or None.
+def reference_video_files(index):
+    """Return the files of the reference videos of the task at `index`.
 
     A task's `reference_video` is a URL, which the browser plays as is, or a
-    file name in reference_video_dir. Without it, the first video file in
-    <reference_video_dir>/<task set>/<index + 1>/ is the task's, so a folder
-    of numbered folders gives every task of a set its video.
-    /reference-video serves the file.
+    file name in reference_video_dir. Without it, every video file in
+    <reference_video_dir>/<task set>/<index + 1>/ is the task's, in name
+    order, so a folder of numbered folders gives every task of a set its
+    videos. /reference-video serves the files.
     """
     video = str(tasks[index].get("reference_video") or "").strip()
     if _is_url(video):
-        return None
+        return []
     if video:
         path = reference_video_dir / video
-        return path if path.is_file() else None
+        return [path] if path.is_file() else []
     folder = reference_video_dir / task_set / str(index + 1)
     try:
         files = sorted(folder.iterdir())
     except OSError:
-        return None
-    return next(
-        (
-            path
-            for path in files
-            if path.suffix.lower() in REFERENCE_VIDEO_SUFFIXES
-            and not path.name.startswith(".")
-            and path.is_file()
-        ),
-        None,
-    )
+        return []
+    return [
+        path
+        for path in files
+        if path.suffix.lower() in REFERENCE_VIDEO_SUFFIXES
+        and not path.name.startswith(".")
+        and path.is_file()
+    ]
 
 
 def next_task():
@@ -699,13 +708,14 @@ def _cancel(request: Request):
     return RedirectResponse(request.url_for("_root"), 303)
 
 
-@app.get("/reference-video/{index}")
-def _reference_video(index: int):
-    """Serve the reference video file of a task (seekable: Range requests work)."""
-    path = reference_video_file(index) if 0 <= index < len(tasks) else None
-    if path is None:
+@app.get("/reference-video/{index}/{number}")
+def _reference_video(index: int, number: int):
+    """Serve a reference video file of a task (seekable: Range requests work)."""
+    files = reference_video_files(index) if 0 <= index < len(tasks) else []
+    if not 0 <= number < len(files):
         return Response(status_code=404)
-    return FileResponse(path)
+    # The same URL can mean another file after the task set changes.
+    return FileResponse(files[number], headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/events", response_class=EventSourceResponse)
