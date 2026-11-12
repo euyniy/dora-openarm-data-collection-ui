@@ -24,7 +24,7 @@ import dora
 import json
 from collections.abc import AsyncIterable
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
 import os
@@ -32,6 +32,7 @@ import pathlib
 import pyarrow as pa
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uvicorn
 import yaml
@@ -51,6 +52,16 @@ launcher_url = "http://127.0.0.1:8080/"
 
 # Operation manual shown on the task screen (see --manual-file).
 manual = None
+
+# Where the reference videos of the tasks are (see --reference-video-dir):
+# <dir>/<task set>/<task number from 1>/<any name>.mp4, or the file that
+# tasks[].reference_video names.
+DEFAULT_REFERENCE_VIDEO_DIR = pathlib.Path("metadatas/task-reference")
+reference_video_dir = DEFAULT_REFERENCE_VIDEO_DIR
+REFERENCE_VIDEO_SUFFIXES = (".mp4", ".m4v", ".webm", ".mov")
+# The id of the task set being recorded: the metadata's task_set, or the
+# metadata file's name.
+task_set = ""
 
 
 # Browser openers, most specific first. "open" is macOS, "xdg-open" is Linux.
@@ -90,6 +101,13 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
+    # Videos of the task done right (tasks[].reference_video, or every video
+    # in the task's numbered folder): URLs, or paths that /reference-video
+    # serves. Several are tiled. Display only.
+    task_reference_videos: list = dataclasses.field(default_factory=list)
+    # The reference video named by the task but not found: shown as a quiet
+    # note, since recording works without it (the NAS may be unmounted).
+    task_reference_missing: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
     # Failures to show in red on the task screen: newest last.
@@ -478,6 +496,59 @@ def apply_task(index):
     state.task_title = task.get("prompt_ja") or task.get("prompt", "")
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
+    video = str(task.get("reference_video") or "").strip()
+    found = reference_video_files(index)
+    if _is_url(video):
+        state.task_reference_videos = [video]
+    else:
+        # The URL differs per file, so the browser never plays a cached video
+        # of another task set (or an older file) at the same index.
+        state.task_reference_videos = [
+            f"/reference-video/{index}/{number}?v="
+            + urllib.parse.quote(f"{task_set}/{path.name}/{_mtime(path)}")
+            for number, path in enumerate(found)
+        ]
+    state.task_reference_missing = video if video and not _is_url(video) and not found else ""
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _is_url(value):
+    return value.startswith(("http://", "https://"))
+
+
+def reference_video_files(index):
+    """Return the files of the reference videos of the task at `index`.
+
+    A task's `reference_video` is a URL, which the browser plays as is, or a
+    file name in reference_video_dir. Without it, every video file in
+    <reference_video_dir>/<task set>/<index + 1>/ is the task's, in name
+    order, so a folder of numbered folders gives every task of a set its
+    videos. /reference-video serves the files.
+    """
+    video = str(tasks[index].get("reference_video") or "").strip()
+    if _is_url(video):
+        return []
+    if video:
+        path = reference_video_dir / video
+        return [path] if path.is_file() else []
+    folder = reference_video_dir / task_set / str(index + 1)
+    try:
+        files = sorted(folder.iterdir())
+    except OSError:
+        return []
+    return [
+        path
+        for path in files
+        if path.suffix.lower() in REFERENCE_VIDEO_SUFFIXES
+        and not path.name.startswith(".")
+        and path.is_file()
+    ]
 
 
 def next_task():
@@ -635,6 +706,16 @@ def _cancel(request: Request):
     state.collecting = False
     state.episode_number += 1
     return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.get("/reference-video/{index}/{number}")
+def _reference_video(index: int, number: int):
+    """Serve a reference video file of a task (seekable: Range requests work)."""
+    files = reference_video_files(index) if 0 <= index < len(tasks) else []
+    if not 0 <= number < len(files):
+        return Response(status_code=404)
+    # The same URL can mean another file after the task set changes.
+    return FileResponse(files[number], headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/events", response_class=EventSourceResponse)
@@ -974,6 +1055,12 @@ def main():
         help="The operation manual (YAML) shown on the task screen",
         type=pathlib.Path,
     )
+    parser.add_argument(
+        "--reference-video-dir",
+        default=os.getenv("REFERENCE_VIDEO_DIR") or DEFAULT_REFERENCE_VIDEO_DIR,
+        help=f"Where the tasks' reference videos are ({DEFAULT_REFERENCE_VIDEO_DIR})",
+        type=pathlib.Path,
+    )
     default_launcher_url = "http://127.0.0.1:8080/"
     parser.add_argument(
         "--launcher-url",
@@ -997,7 +1084,11 @@ def main():
     launcher_url = args.launcher_url.rstrip("/") + "/"
     global manual
     manual = load_manual(args.manual_file)
+    global reference_video_dir
+    reference_video_dir = args.reference_video_dir.expanduser()
     metadata = load_yaml(args.metadata_file)
+    global task_set
+    task_set = str(metadata.get("task_set") or args.metadata_file.stem)
     tasks = metadata["tasks"]
     apply_task(state.task_index)
 
