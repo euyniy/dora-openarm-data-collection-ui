@@ -216,18 +216,31 @@
 
       /* --- カメラ映像（ライブ） ------------------------------------- */
 
-      /* The ceiling on top, the tabbed pair (head or wrist) below. Each
-         image is shown whole inside its tile, whatever its shape. */
+      /* Three views: one head camera, the head with both wrists, or all
+         five. Each image is shown whole inside its tile, whatever its shape
+         (the head is 16:9, the others 16:10). */
       .camera-view {
         flex: 1;
         min-height: 0;
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        grid-template-rows: auto 1fr 1fr;
         gap: 4px;
         padding: 4px;
       }
-      .camera-view-head { grid-column: 1 / -1; display: flex; }
+      #camera-view[data-view="head"] {
+        grid-template: "bar" auto "hl" 1fr / 1fr;
+      }
+      /* Rows split about 4:3 so the head above and the wrists below both
+         use the height. */
+      #camera-view[data-view="wrists"] {
+        grid-template: "bar bar" auto "hl hl" 4fr "wl wr" 3fr / 1fr 1fr;
+      }
+      #camera-view[data-view="all"] {
+        grid-template:
+          "bar bar bar bar bar bar" auto
+          "hl hl hl hr hr hr" 4fr
+          "ce ce wl wl wr wr" 3fr / 1fr 1fr 1fr 1fr 1fr 1fr;
+      }
+      .camera-view-head { grid-area: bar; display: flex; }
       .camera-tabs { display: flex; gap: 4px; }
       .camera-tab {
         background: transparent;
@@ -238,18 +251,24 @@
       }
       .camera-tab:disabled { opacity: 0.3; cursor: default; }
       .camera-tab .tab-warn { color: var(--warn); margin-left: 4px; }
-      #camera-view[data-group="head"] .camera-tab[data-tab="head"],
-      #camera-view[data-group="wrist"] .camera-tab[data-tab="wrist"] {
+      #camera-view[data-view="head"] .camera-tab[data-tab="head"],
+      #camera-view[data-view="wrists"] .camera-tab[data-tab="wrists"],
+      #camera-view[data-view="all"] .camera-tab[data-tab="all"] {
         color: var(--bg);
         background: var(--text);
       }
-      /* Only the picked pair is shown (and sent); the ceiling always is. */
-      #camera-view[data-group="head"] .camera-tile[data-group="wrist"],
-      #camera-view[data-group="wrist"] .camera-tile[data-group="head"] {
-        display: none;
+      /* Only the picked view's cameras are shown (and sent). */
+      .camera-tile { position: relative; min-width: 0; min-height: 0; display: none; }
+      #camera-view[data-view="head"] .camera-tile[data-views~="head"],
+      #camera-view[data-view="wrists"] .camera-tile[data-views~="wrists"],
+      #camera-view[data-view="all"] .camera-tile[data-views~="all"] {
+        display: block;
       }
-      .camera-tile { position: relative; min-width: 0; min-height: 0; }
-      .camera-tile.ceiling { grid-column: 1 / -1; }
+      [data-cam-view="camera_head_left"] { grid-area: hl; }
+      [data-cam-view="camera_head_right"] { grid-area: hr; }
+      [data-cam-view="camera_ceiling"] { grid-area: ce; }
+      [data-cam-view="camera_wrist_left"] { grid-area: wl; }
+      [data-cam-view="camera_wrist_right"] { grid-area: wr; }
       .camera-tile .frame { position: absolute; inset: 0; background: #000; }
       .camera-tile img {
         width: 100%;
@@ -492,34 +511,36 @@
 
         {% if camera_view_enabled -%}
         <div class="camera-view" id="camera-view"
-             data-group="{{ camera_view_default_group }}"{% if not camera_view_status %} hidden{% endif %}>
+             data-view="{{ camera_view_default }}"{% if not camera_view_status %} hidden{% endif %}>
           <div class="camera-view-head">
             <div class="camera-tabs" role="tablist">
-              {% for group, label in [("head", "頭部"), ("wrist", "手首")] -%}
+              {% for view, label in [("head", "頭部"), ("wrists", "頭部＋手首"), ("all", "全カメラ")] -%}
               {% set tab = namespace(wired=false, warn=false) -%}
-              {% for cam in camera_view_groups[group] -%}
+              {% for cam in camera_views[view] -%}
                 {% if cam in camera_view_status -%}
                   {% set tab.wired = true -%}
                   {% if not camera_view_status[cam] %}{% set tab.warn = true %}{% endif -%}
                 {% endif -%}
               {% endfor -%}
-              <button type="button" class="camera-tab" role="tab" data-tab="{{ group }}"
-                      data-cams="{{ camera_view_groups[group] | join(" ") }}"
+              <button type="button" class="camera-tab" role="tab" data-tab="{{ view }}"
+                      data-cams="{{ camera_views[view] | join(" ") }}"
                       {%- if not tab.wired %} disabled{% endif %}>
                 {{ label }}<span class="tab-warn"{% if not tab.warn %} hidden{% endif %}>⚠</span>
               </button>
               {% endfor -%}
             </div>
           </div>
-          {% for cam, label, group in [
-            ("camera_ceiling", "天井", "ceiling"),
-            ("camera_head_left", "頭部（左）", "head"),
-            ("camera_head_right", "頭部（右）", "head"),
-            ("camera_wrist_left", "手首（左）", "wrist"),
-            ("camera_wrist_right", "手首（右）", "wrist"),
+          {% for cam, label in [
+            ("camera_head_left", "頭部（左）"),
+            ("camera_head_right", "頭部（右）"),
+            ("camera_ceiling", "天井"),
+            ("camera_wrist_left", "手首（左）"),
+            ("camera_wrist_right", "手首（右）"),
           ] -%}
-          <div class="camera-tile {{ "ceiling" if group == "ceiling" else "pair" }}{% if camera_view_status.get(cam) == false %} stale{% endif %}"
-               data-cam-view="{{ cam }}" data-group="{{ group }}"{% if cam not in camera_view_status %} hidden{% endif %}>
+          <div class="camera-tile{% if camera_view_status.get(cam) == false %} stale{% endif %}"
+               data-cam-view="{{ cam }}"
+               data-views="{% for view, cams in camera_views.items() if cam in cams %}{{ view }} {% endfor %}"
+               {%- if cam not in camera_view_status %} hidden{% endif %}>
             <span class="cam-name">{{ label }}</span>
             <div class="frame">
               <img alt="{{ label }}">
@@ -530,11 +551,11 @@
         </div>
         <script>
           // Before the first paint, so the reload after every state change
-          // does not flash the default tab.
+          // does not flash the default view.
           try {
-            const group = sessionStorage.getItem("cameraViewGroup");
-            if (group === "head" || group === "wrist") {
-              document.getElementById("camera-view").dataset.group = group;
+            const view = sessionStorage.getItem("cameraView");
+            if (["head", "wrists", "all"].includes(view)) {
+              document.getElementById("camera-view").dataset.view = view;
             }
           } catch (e) {}
         </script>
@@ -882,10 +903,10 @@
           stale > 0 ? "block" : "none";
       };
 
-      // Live camera view: one WebSocket carries the ceiling and the picked
-      // pair (`?group=`) as `name\n<jpeg>` (binary), plus a JSON text
-      // message saying which cameras are live, the other pair included so
-      // its tab can show ⚠. Only that message shows 映像なし: a camera is
+      // Live camera view: one WebSocket carries the picked view's cameras
+      // (`?view=`) as `name\n<jpeg>` (binary), plus a JSON text message
+      // saying which cameras are live, the other views' included so their
+      // buttons can show ⚠. Only that message shows 映像なし: a camera is
       // reported silent when this node stops receiving it, and nothing
       // else -- a page reload, an arm starting, this socket reconnecting --
       // changes a tile. Closed while the tab is hidden so a forgotten
@@ -923,9 +944,9 @@
         const openCameraSocket = () => {
           if (cameraSocket || document.hidden) return;
           const scheme = location.protocol === "https:" ? "wss" : "ws";
-          const group = encodeURIComponent(cameraView.dataset.group);
+          const view = encodeURIComponent(cameraView.dataset.view);
           cameraSocket = new WebSocket(
-            `${scheme}://${location.host}/cameras?group=${group}`
+            `${scheme}://${location.host}/cameras?view=${view}`
           );
           cameraSocket.binaryType = "arraybuffer";
           cameraSocket.onmessage = (e) => {
@@ -959,14 +980,14 @@
             openCameraSocket();
           }
         });
-        // Switching tabs reconnects, so the server only sends the pair that
-        // is on screen. The choice survives the page's reloads.
+        // Switching views reconnects, so the server only sends the cameras
+        // on screen. The choice survives the page's reloads.
         for (const tab of document.querySelectorAll(".camera-tab")) {
           tab.addEventListener("click", () => {
-            if (tab.dataset.tab === cameraView.dataset.group) return;
-            cameraView.dataset.group = tab.dataset.tab;
+            if (tab.dataset.tab === cameraView.dataset.view) return;
+            cameraView.dataset.view = tab.dataset.tab;
             try {
-              sessionStorage.setItem("cameraViewGroup", tab.dataset.tab);
+              sessionStorage.setItem("cameraView", tab.dataset.tab);
             } catch (e) {}
             closeCameraSocket();
             openCameraSocket();
