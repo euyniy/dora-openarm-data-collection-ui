@@ -30,6 +30,7 @@ from fastapi.templating import Jinja2Templates
 import os
 import pathlib
 import pyarrow as pa
+import re
 import time
 import urllib.error
 import urllib.request
@@ -90,6 +91,9 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
+    # task_description split into start / done / reset, or None when it
+    # doesn't follow that pattern.
+    task_steps: dict | None = None
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
     # Failures to show in red on the task screen: newest last.
@@ -481,6 +485,43 @@ def apply_task(index):
     state.task_title = task.get("prompt_ja") or task.get("prompt", "")
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
+    state.task_steps = split_description(state.task_description)
+
+
+# Folded YAML joins Japanese lines with a space: drop spaces between
+# non-ASCII characters.
+_CJK_SPACE = re.compile(r"(?<=[^\x00-\x7f]) +(?=[^\x00-\x7f])")
+_DESCRIPTION_PATTERNS = (
+    re.compile(
+        r"(?:初期状態[:：]\s*)?(?P<start>.*?)"
+        r"(?:\s*完了状態[:：]\s*(?P<done>.*?))?"
+        r"(?:\s*次の周を始める前に[、,]?\s*(?P<reset>.*))?",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?:Initial state:\s*)?(?P<start>.*?)"
+        r"(?:\s*Done when\s+(?P<done>.*?))?"
+        r"(?:\s*(?P<reset>Before repeating.*))?",
+        re.DOTALL,
+    ),
+)
+
+
+def split_description(text):
+    """Split a task description into start / done / reset texts.
+
+    Returns None when the description has none of the markers, so the
+    caller shows it as one paragraph.
+    """
+    text = _CJK_SPACE.sub("", text.strip())
+    for pattern in _DESCRIPTION_PATTERNS:
+        match = pattern.fullmatch(text)
+        steps = {k: v for k, v in match.groupdict().items() if v}
+        if steps.get("done") or steps.get("reset") or match.start("start") > 0:
+            if "done" in steps:
+                steps["done"] = steps["done"][0].upper() + steps["done"][1:]
+            return steps
+    return None
 
 
 def next_task():

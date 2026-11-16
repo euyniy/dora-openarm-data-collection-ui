@@ -91,6 +91,11 @@
 
       .task-title { font-size: 18px; font-weight: bold; line-height: 1.4; }
       .task-description { color: #bbb; line-height: 1.6; }
+      .task-steps { display: grid; gap: 6px; }
+      .task-step { border-left: 3px solid var(--line); padding-left: 8px; line-height: 1.5; }
+      .task-step .label { margin-bottom: 1px; }
+      .task-step.done { border-color: var(--ok); }
+      .task-step.reset { border-color: var(--warn); color: var(--muted); font-size: 12px; }
       .task-prompt { font-size: 12px; color: var(--muted); }
 
       /* Errors reported to /api/error: only shown while there are any. */
@@ -405,7 +410,18 @@
         <section class="sec">
           <div class="label">タスク <span class="mono">{{ state.task_index }}</span></div>
           <div class="task-title">{{ state.task_title }}</div>
-          {% if state.task_description -%}
+          {% if state.task_steps -%}
+            <div class="task-steps">
+              {% for key, label in [("start", "開始時"), ("done", "完了条件"), ("reset", "次の周の前に")] -%}
+                {% if state.task_steps[key] -%}
+                  <div class="task-step {{ key }}">
+                    <div class="label">{{ label }}</div>
+                    {{ state.task_steps[key] }}
+                  </div>
+                {% endif -%}
+              {% endfor -%}
+            </div>
+          {% elif state.task_description -%}
             <div class="task-description">{{ state.task_description }}</div>
           {% endif -%}
           {% if state.task_prompt and state.task_prompt != state.task_title -%}
