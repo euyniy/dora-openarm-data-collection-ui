@@ -30,6 +30,7 @@ from fastapi.templating import Jinja2Templates
 import os
 import pathlib
 import pyarrow as pa
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -101,6 +102,9 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
+    # task_description split at its headings (see _description_items), one
+    # row each on the task screen.
+    task_description_items: list = dataclasses.field(default_factory=list)
     # Videos of the task done right (tasks[].reference_video, or every video
     # in the task's numbered folder): URLs, or paths that /reference-video
     # serves. Several are tiled. Display only.
@@ -157,17 +161,17 @@ CAMERA_INPUTS = (
 CAMERA_TIMESTAMP_WINDOW = 60
 CAMERA_STALE_AFTER_S = 1.0
 
-# Cameras shown live to the operator. The ceiling is always shown; below it
-# the operator picks one pair with a tab. Only the ceiling and the picked
-# pair are sent, since every camera shown costs browser CPU on the same PC
-# that records.
-CAMERA_VIEW_ALWAYS = ("camera_ceiling",)
+# Cameras shown live to the operator, picked with a tab: the head and both
+# wrists (what the robot sees while it works), or the ceiling. Only the
+# picked group is sent, since every camera shown costs browser CPU on the
+# same PC that records.
+CAMERA_VIEW_HEAD = ("camera_head_left", "camera_head_right")
 CAMERA_VIEW_GROUPS = {
-    "head": ("camera_head_left", "camera_head_right"),
-    "wrist": ("camera_wrist_left", "camera_wrist_right"),
+    "main": CAMERA_VIEW_HEAD + ("camera_wrist_left", "camera_wrist_right"),
+    "ceiling": ("camera_ceiling",),
 }
-CAMERA_VIEW_DEFAULT_GROUP = "head"
-CAMERA_VIEW_INPUTS = CAMERA_VIEW_ALWAYS + tuple(
+CAMERA_VIEW_DEFAULT_GROUP = "main"
+CAMERA_VIEW_INPUTS = tuple(
     name for group in CAMERA_VIEW_GROUPS.values() for name in group
 )
 
@@ -357,16 +361,38 @@ def _store_camera_frame(event_id: str, value, metadata) -> None:
     frame_received_at[event_id] = time.monotonic()
 
 
+def _head_camera() -> str:
+    """Return the one head camera shown: the left eye, or the right without it.
+
+    The two eyes show nearly the same picture, so the second would only
+    cost CPU and room on the screen.
+    """
+    for name in CAMERA_VIEW_HEAD:
+        if name in frame_received_at:
+            return name
+    return CAMERA_VIEW_HEAD[0]
+
+
+def _camera_view_names(group: str) -> tuple:
+    """Return the cameras sent for a tab, with the head as one camera."""
+    names = CAMERA_VIEW_GROUPS.get(group, CAMERA_VIEW_GROUPS[CAMERA_VIEW_DEFAULT_GROUP])
+    head = _head_camera()
+    return tuple(name for name in names if name not in CAMERA_VIEW_HEAD or name == head)
+
+
 def _camera_view_status() -> dict[str, bool]:
     """Whether each viewed camera is delivering, keyed by input id.
 
     A camera that never sent a frame is left out: this dataflow did not wire
-    it, so its tile stays hidden rather than reading 映像なし forever.
+    it, so its tile stays hidden rather than reading 映像なし forever. So is
+    the head camera that is not shown (see _head_camera).
     """
     now = time.monotonic()
+    head = _head_camera()
     return {
         name: now - received_at <= CAMERA_VIEW_SILENT_AFTER_S
         for name, received_at in frame_received_at.items()
+        if name not in CAMERA_VIEW_HEAD or name == head
     }
 
 
@@ -496,6 +522,7 @@ def apply_task(index):
     state.task_title = task.get("prompt_ja") or task.get("prompt", "")
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
+    state.task_description_items = _description_items(state.task_description)
     video = str(task.get("reference_video") or "").strip()
     found = reference_video_files(index)
     if _is_url(video):
@@ -509,6 +536,44 @@ def apply_task(index):
             for number, path in enumerate(found)
         ]
     state.task_reference_missing = video if video and not _is_url(video) and not found else ""
+
+
+# The headings a description is split at: 【注意】 style, and the older
+# 「初期状態: … 完了状態: …」 style. `kind` is how the row is shown: "warn"
+# (must not be missed) in yellow, "setup" (how the scene starts) in blue.
+_DESCRIPTION_HEADING = re.compile(
+    r"【([^】]+)】|(初期状態|完了状態|終了状態|Initial state|Final state)\s*[:：]"
+)
+_DESCRIPTION_KINDS = {
+    "注意": "warn",
+    "スキップ": "warn",
+    "準備": "setup",
+    "初期状態": "setup",
+    "Initial state": "setup",
+}
+
+
+def _description_items(text):
+    """Split a task description at its headings, one item per heading.
+
+    Returns [{"heading", "text", "kind"}]. Text before the first heading (or
+    a description without headings) is one item without a heading.
+    """
+    text = " ".join(str(text or "").split())
+    items = []
+    heading, start = "", 0
+    for match in _DESCRIPTION_HEADING.finditer(text):
+        body = text[start : match.start()].strip()
+        if heading or body:
+            items.append((heading, body))
+        heading, start = match.group(1) or match.group(2), match.end()
+    body = text[start:].strip()
+    if heading or body:
+        items.append((heading, body))
+    return [
+        {"heading": heading, "text": body, "kind": _DESCRIPTION_KINDS.get(heading, "")}
+        for heading, body in items
+    ]
 
 
 def _mtime(path):
@@ -824,12 +889,12 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
 async def _cameras(websocket: WebSocket):
     """Push each viewed camera's newest frame and whether it is live.
 
-    `?group=` picks the pair sent besides the ceiling (CAMERA_VIEW_GROUPS);
-    the page reconnects when the operator switches tabs.
+    `?group=` picks the cameras sent (CAMERA_VIEW_GROUPS); the page
+    reconnects when the operator switches tabs.
 
     Frames are binary messages: the camera's name, a newline, the JPEG.
     Every CAMERA_VIEW_STATUS_INTERVAL_S a text message carries
-    _camera_view_status() as JSON for every camera, including the pair not
+    _camera_view_status() as JSON for every camera, including the ones not
     shown, so the other tab can warn about a dead camera; it alone decides
     映像なし.
 
@@ -844,10 +909,7 @@ async def _cameras(websocket: WebSocket):
         await websocket.close()
         return
     group = websocket.query_params.get("group", CAMERA_VIEW_DEFAULT_GROUP)
-    names = CAMERA_VIEW_ALWAYS + CAMERA_VIEW_GROUPS.get(
-        group, CAMERA_VIEW_GROUPS[CAMERA_VIEW_DEFAULT_GROUP]
-    )
-    sent = {name: 0 for name in names}
+    sent = {name: 0 for name in CAMERA_VIEW_INPUTS}
     status_sent_at = 0.0
     try:
         while state.running:
@@ -855,7 +917,9 @@ async def _cameras(websocket: WebSocket):
             if now - status_sent_at >= CAMERA_VIEW_STATUS_INTERVAL_S:
                 status_sent_at = now
                 await websocket.send_text(json.dumps(_camera_view_status()))
-            for name in names:
+            # Asked for every round: the head camera shown is only known once
+            # the cameras have started delivering.
+            for name in _camera_view_names(group):
                 seq = frame_seq[name]
                 if seq == sent[name] or name not in latest_frames:
                     continue

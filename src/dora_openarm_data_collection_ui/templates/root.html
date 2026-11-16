@@ -166,41 +166,64 @@
         align-items: center;
         text-align: center;
       }
-      .task-label { font-size: 16px; color: #888; letter-spacing: 0.15em; }
+      .task-label { font-size: 14px; color: #888; letter-spacing: 0.15em; }
       .task-title {
-        font-size: 40px;
+        font-size: 24px;
         font-weight: bold;
-        color: #00e5ff;
-        text-shadow: 0 0 10px #00e5ff, 0 0 30px #00e5ff;
-        line-height: 1.4;
+        color: #f2f2f7;
+        line-height: 1.5;
       }
-      .task-description { font-size: 19px; color: #c8c8d8; line-height: 1.7; }
-      .task-prompt { font-size: 14px; color: #666; }
-      .task-reference {
+      .task-prompt { font-size: 13px; color: #777; }
+      /* The description, one row per heading. 注意 / スキップ must not be
+         missed (yellow); 準備 / 初期状態 is how the scene starts (blue). */
+      .task-items {
         width: 100%;
+        list-style: none;
         display: flex;
         flex-direction: column;
-        align-items: center;
         gap: 6px;
-        margin-top: 8px;
+        margin-top: 6px;
+        text-align: left;
       }
-      .task-reference-label { font-size: 14px; color: #888; letter-spacing: 0.1em; }
-      .task-reference-missing { font-size: 14px; color: #777; }
-      .task-reference video {
-        max-width: 100%;
-        max-height: 360px;
-        border-radius: 10px;
-        background: #000;
+      .task-item {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        font-size: 16px;
+        line-height: 1.6;
+        color: #c8c8d8;
+        padding: 4px 10px;
+        border-radius: 8px;
       }
-      .task-reference-videos { width: 100%; text-align: center; }
-      /* Several reference videos: side by side, wrapping to more rows. */
-      .task-reference-grid {
+      .task-item-heading {
+        flex: none;
+        min-width: 5.5em;
+        font-size: 13px;
+        font-weight: bold;
+        color: #9a9ab0;
+      }
+      .task-item.warn { background: rgba(255, 204, 0, 0.12); color: #ffe9a8; }
+      .task-item.warn .task-item-heading { color: #ffcc00; }
+      .task-item.setup { background: rgba(0, 229, 255, 0.1); color: #d6f6fb; }
+      .task-item.setup .task-item-heading { color: #00e5ff; }
+      /* The reference: how the scene starts, how it ends, and the motion. */
+      .task-reference {
         width: 100%;
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 8px;
+        margin-top: 10px;
       }
-      .task-reference-grid video { width: 100%; max-height: 240px; }
+      .task-reference figure { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .task-reference figcaption { font-size: 13px; color: #888; letter-spacing: 0.1em; }
+      .task-reference video {
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: contain;
+        border-radius: 8px;
+        background: #000;
+      }
+      .task-reference-missing { font-size: 13px; color: #777; }
 
       .big-button {
         font-family: inherit;
@@ -308,13 +331,13 @@
         gap: 20px;
         align-items: stretch;
       }
-      .task-row .task-card { width: auto; flex: 1 1 0; justify-content: center; }
+      .task-row .task-card { width: auto; flex: 1 1 0; justify-content: flex-start; }
       @media (max-width: 1100px) {
         .task-row { flex-direction: column; }
       }
 
-      /* The ceiling shows the whole scene, so it gets the full width; the
-         tabbed pair (head or wrist) sits side by side below. */
+      /* The head gets the full width and the wrists sit side by side below
+         it; the ceiling is on its own tab. */
       .camera-view {
         flex: 1.2 1 0;
         min-width: 0;
@@ -346,18 +369,19 @@
       }
       .camera-tab:disabled { opacity: 0.3; cursor: default; }
       .camera-tab .tab-warn { color: #ffcc00; margin-left: 6px; }
-      #camera-view[data-group="head"] .camera-tab[data-tab="head"],
-      #camera-view[data-group="wrist"] .camera-tab[data-tab="wrist"] {
+      #camera-view[data-group="main"] .camera-tab[data-tab="main"],
+      #camera-view[data-group="ceiling"] .camera-tab[data-tab="ceiling"] {
         color: #00e5ff;
         border-color: #00e5ff;
       }
-      /* Only the picked pair is shown (and sent); the ceiling always is. */
-      #camera-view[data-group="head"] .camera-tile[data-group="wrist"],
-      #camera-view[data-group="wrist"] .camera-tile[data-group="head"] {
+      /* Only the picked tab's cameras are shown (and sent). */
+      #camera-view[data-group="main"] .camera-tile[data-group="ceiling"],
+      #camera-view[data-group="ceiling"] .camera-tile[data-group="main"] {
         display: none;
       }
       .camera-tile { position: relative; display: flex; flex-direction: column; gap: 4px; }
-      .camera-tile.ceiling { grid-column: 1 / -1; }
+      .camera-tile[hidden] { display: none; }
+      .camera-tile.wide { grid-column: 1 / -1; }
       .camera-tile .cam-name { font-size: 13px; letter-spacing: 0.1em; color: #888; }
       .camera-tile .frame {
         position: relative;
@@ -366,7 +390,6 @@
         overflow: hidden;
         aspect-ratio: 16 / 9;
       }
-      .camera-tile.ceiling .frame { aspect-ratio: 16 / 10; }
       .camera-tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
       .camera-tile .no-signal {
         display: none;
@@ -460,6 +483,22 @@
         transition: opacity 0.15s ease, transform 0.15s ease;
         box-shadow: 0 0 12px rgba(255, 204, 0, 0.25);
       }
+      /* Fills while C is held, so the operator sees when the skip fires. */
+      .hold-toast { color: #e0e0e0; border-color: rgba(136, 136, 136, 0.6); overflow: hidden; }
+      .hold-toast::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: rgba(255, 255, 255, 0.14);
+        transform: scaleX(0);
+        transform-origin: left;
+      }
+      /* Delayed, so a short press (start / finish) does not flash it. */
+      .hold-toast.show { transition-delay: 0.2s; }
+      .hold-toast.show::before {
+        transform: scaleX(1);
+        transition: transform 0.8s linear 0.2s;
+      }
       .cooldown-toast.show {
         opacity: 1;
         transform: translateX(-50%) translateY(0);
@@ -508,6 +547,8 @@
   </head>
   <body>
     <div id="cooldown-toast" class="cooldown-toast">収録開始から間もないため、少し待ってから押してください</div>
+
+    <div id="hold-toast" class="cooldown-toast hold-toast">C を押し続けるとこのタスクを飛ばします</div>
 
     {% if state.errors -%}
       <div class="alert" id="error-panel">
@@ -587,22 +628,43 @@
       <div class="task-card">
         <div class="task-label">タスク <span class="mono">{{ state.task_index }}</span></div>
         <div class="task-title">{{ state.task_title }}</div>
-        {% if state.task_description -%}
-          <div class="task-description">{{ state.task_description }}</div>
-        {% endif -%}
         {% if state.task_prompt and state.task_prompt != state.task_title -%}
           <div class="task-prompt">{{ state.task_prompt }}</div>
         {% endif -%}
-        {% if state.task_reference_videos -%}
-          <div class="task-reference">
-            <div class="task-reference-label">参考動画</div>
-            <div class="task-reference-videos{{ ' task-reference-grid' if state.task_reference_videos | length > 1 }}">
-            {% for video in state.task_reference_videos -%}
-              {# Muted so that the browser lets it autoplay. -#}
-              <video src="{{ video }}" autoplay muted loop playsinline controls
-                     preload="auto"></video>
+        {% if state.task_description_items -%}
+          <ul class="task-items">
+            {% for item in state.task_description_items -%}
+              <li class="task-item {{ item.kind }}">
+                {% if item.heading -%}
+                  <span class="task-item-heading">{{ item.heading }}</span>
+                {% endif -%}
+                <span>{{ item.text }}</span>
+              </li>
             {% endfor -%}
-            </div>
+          </ul>
+        {% endif -%}
+        {% if state.task_reference_videos -%}
+          {# The stills are the first video's first and last frame, shown by
+             a paused <video>, so nothing has to be extracted beforehand. -#}
+          <div class="task-reference">
+            <figure>
+              <figcaption>初期状態</figcaption>
+              <video src="{{ state.task_reference_videos[0] }}" data-still="start"
+                     muted playsinline preload="auto"></video>
+            </figure>
+            <figure>
+              <figcaption>終了状態</figcaption>
+              <video src="{{ state.task_reference_videos[0] }}" data-still="end"
+                     muted playsinline preload="auto"></video>
+            </figure>
+            {% for video in state.task_reference_videos -%}
+              <figure>
+                <figcaption>参考動画</figcaption>
+                {# Muted so that the browser lets it autoplay. -#}
+                <video src="{{ video }}" autoplay muted loop playsinline controls
+                       preload="auto"></video>
+              </figure>
+            {% endfor -%}
           </div>
         {% elif state.task_reference_missing -%}
           <div class="task-reference-missing">参考動画なし: {{ state.task_reference_missing }}</div>
@@ -615,7 +677,7 @@
         <div class="camera-view-head">
           <div class="camera-stats-title">カメラ映像（ライブ）</div>
           <div class="camera-tabs" role="tablist">
-            {% for group, label in [("head", "頭部"), ("wrist", "手首")] -%}
+            {% for group, label in [("main", "頭部・手首"), ("ceiling", "天井")] -%}
             {% set tab = namespace(wired=false, warn=false) -%}
             {% for cam in camera_view_groups[group] -%}
               {% if cam in camera_view_status -%}
@@ -631,14 +693,14 @@
             {% endfor -%}
           </div>
         </div>
-        {% for cam, label, group in [
-          ("camera_ceiling", "天井", "ceiling"),
-          ("camera_head_left", "頭部（左）", "head"),
-          ("camera_head_right", "頭部（右）", "head"),
-          ("camera_wrist_left", "手首（左）", "wrist"),
-          ("camera_wrist_right", "手首（右）", "wrist"),
+        {% for cam, label, group, wide in [
+          ("camera_head_left", "頭部", "main", true),
+          ("camera_head_right", "頭部", "main", true),
+          ("camera_wrist_left", "手首（左）", "main", false),
+          ("camera_wrist_right", "手首（右）", "main", false),
+          ("camera_ceiling", "天井", "ceiling", true),
         ] -%}
-        <div class="camera-tile {{ "ceiling" if group == "ceiling" else "pair" }}{% if camera_view_status.get(cam) == false %} stale{% endif %}"
+        <div class="camera-tile{{ " wide" if wide }}{% if camera_view_status.get(cam) == false %} stale{% endif %}"
              data-cam-view="{{ cam }}" data-group="{{ group }}"{% if cam not in camera_view_status %} hidden{% endif %}>
           <span class="cam-name">{{ label }}</span>
           <div class="frame">
@@ -653,7 +715,7 @@
         // does not flash the default tab.
         try {
           const group = sessionStorage.getItem("cameraViewGroup");
-          if (group === "head" || group === "wrist") {
+          if (group === "main" || group === "ceiling") {
             document.getElementById("camera-view").dataset.group = group;
           }
         } catch (e) {}
@@ -842,6 +904,18 @@
           }
         });
       }
+      // The 初期状態 / 終了状態 stills: a paused video parked on its first
+      // or last frame.
+      for (const still of document.querySelectorAll("video[data-still]")) {
+        const park = () => {
+          const end = still.dataset.still === "end" && Number.isFinite(still.duration);
+          // Just short of the end: at the very end some browsers show nothing.
+          still.currentTime = end ? Math.max(0, still.duration - 0.1) : 0.001;
+        };
+        if (still.readyState >= 1) park();
+        else still.addEventListener("loadedmetadata", park, {once: true});
+      }
+
       const LONG_PRESS_MS = 1000;
       // A start->finish toggle is two separate <form> submits (page
       // navigations, since these POST and 303-redirect), so we can't just
@@ -941,10 +1015,13 @@
         if (event.repeat || window.quitRequestPending) return;
 
         if (event.key.toLowerCase() === "c") {
+          // `c` is start / finish (short press) / skip the task (long
+          // press, while not recording).
           if (!skipTimer) {
+            const skipForm = document.getElementById("skip-form");
+            if (skipForm) document.getElementById("hold-toast").classList.add("show");
             skipTimer = setTimeout(() => {
               skipTimer = null;
-              const skipForm = document.getElementById("skip-form");
               if (skipForm) submitAction(skipForm);
             }, LONG_PRESS_MS);
           }
@@ -996,6 +1073,7 @@
       document.addEventListener("keyup", (event) => {
         if (window.quitRequestPending) return;
         if (event.key.toLowerCase() === "c") {
+          document.getElementById("hold-toast").classList.remove("show");
           if (skipTimer) {
             clearTimeout(skipTimer);
             skipTimer = null;
@@ -1127,10 +1205,10 @@
           stale > 0 ? "block" : "none";
       };
 
-      // Live camera view: one WebSocket carries the ceiling and the picked
-      // pair (`?group=`) as `name\n<jpeg>` (binary), plus a JSON text
-      // message saying which cameras are live, the other pair included so
-      // its tab can show ⚠. Only that message shows 映像なし: a camera is
+      // Live camera view: one WebSocket carries the picked tab's cameras
+      // (`?group=`) as `name\n<jpeg>` (binary), plus a JSON text message
+      // saying which cameras are live, the other tab's included so it can
+      // show ⚠. Only that message shows 映像なし: a camera is
       // reported silent when this node stops receiving it, and nothing
       // else -- a page reload, an arm starting, this socket reconnecting --
       // changes a tile. Closed while the tab is hidden so a forgotten
@@ -1204,8 +1282,8 @@
             openCameraSocket();
           }
         });
-        // Switching tabs reconnects, so the server only sends the pair that
-        // is on screen. The choice survives the page's reloads.
+        // Switching tabs reconnects, so the server only sends the cameras
+        // that are on screen. The choice survives the page's reloads.
         for (const tab of document.querySelectorAll(".camera-tab")) {
           tab.addEventListener("click", () => {
             if (tab.dataset.tab === cameraView.dataset.group) return;
