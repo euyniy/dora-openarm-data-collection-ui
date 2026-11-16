@@ -119,6 +119,8 @@
         word-break: break-all;
       }
       .error-list .meta { color: var(--muted); margin-right: 6px; }
+      #live-alerts:empty { display: none; }
+      #live-alerts li.warn { color: var(--warn); border-color: var(--warn); }
       .error-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 
       /* --- ストリーム状態 -------------------------------------------- */
@@ -142,40 +144,30 @@
       .stat-row.error .cam-jitter { color: var(--bad); }
       .stat-row.stale .cam-fps,
       .stat-row.stale .cam-jitter { color: #555; }
-      .stream-alert { display: none; color: var(--bad); font-size: 12px; }
       .device-name { color: var(--muted); font-size: 11px; margin-left: 6px; }
 
-      /* Motor temperatures: one block per arm, left arm first. */
-      .arm-temps .temp-sides { display: flex; flex-direction: column; gap: 6px; }
-      .arm-temps .temp-side-title { font-size: 12px; color: #aaa; }
-      .arm-temps .temp-head,
-      .arm-temps .temp-row {
+      /* Motors: one line per arm -- bus, hottest motor, motors in trouble. */
+      .arm-line {
         display: grid;
-        grid-template-columns: 44px 52px 52px 1fr;
-        gap: 6px;
+        grid-template-columns: 1fr auto 72px;
+        gap: 2px 8px;
         align-items: baseline;
-        font-size: 12px;
+        font-size: 13px;
       }
-      .arm-temps .temp-head { font-size: 10px; color: #666; }
-      .arm-temps .joint { color: var(--muted); }
-      .arm-temps .mos,
-      .arm-temps .rotor { font-variant-numeric: tabular-nums; }
+      .arm-line .hottest { text-align: right; }
+      .arm-line .faults { grid-column: 1 / -1; font-size: 12px; font-weight: bold; }
+      .arm-line .faults:empty { display: none; }
+      .arm-line .faults .fault { color: var(--bad); }
+      .arm-line .faults .silent { color: #f90; }
       /* 40 C and below green, 70 C and below yellow, above that red. */
-      .arm-temps .ok { color: var(--ok); }
-      .arm-temps .warm { color: var(--warn); }
-      .arm-temps .hot { color: var(--bad); }
-      .arm-temps .unknown { color: #555; }
-
-      /* What the motor says about itself. DISABLED is torque off, not a
-         fault, so only codes the motor flags as errors are red. */
-      .arm-temps .mstatus { color: #666; }
-      .arm-temps .mstatus.enabled { color: var(--ok); }
-      .arm-temps .mstatus.fault { color: var(--bad); font-weight: bold; }
-      .arm-temps .mstatus.silent { color: #f90; font-weight: bold; }
+      .arm-line .ok { color: var(--ok); }
+      .arm-line .warm { color: var(--warn); }
+      .arm-line .hot { color: var(--bad); }
+      .arm-line .unknown { color: #555; }
 
       /* Bus state is a property of the whole interface: one badge per arm,
          showing only the heaviest condition. */
-      .bus-badge { margin-left: 6px; font-size: 11px; color: var(--muted); }
+      .bus-badge { font-size: 12px; color: var(--muted); }
       .bus-badge.ok { color: var(--ok); }
       .bus-badge.warn { color: var(--warn); }
       .bus-badge.error { color: var(--bad); }
@@ -384,9 +376,11 @@
           </div>
         </section>
 
-        {% if state.errors -%}
-          <section class="sec errors" id="error-panel">
-            <div class="title">⚠ エラーが発生しています</div>
+        <section class="sec errors" id="error-panel"{% if not state.errors %} hidden{% endif %}>
+          <div class="title">⚠ {{ "エラーが発生しています" if state.errors else "確認してください" }}</div>
+          <!-- Live threshold warnings from the health streams, by key. -->
+          <ul class="error-list" id="live-alerts"></ul>
+          {% if state.errors -%}
             <div class="hint">
               収録を続ける前に内容を確認してください。解消しない場合は、下の内容を担当者に伝えてください。
             </div>
@@ -404,8 +398,8 @@
               </form>
               <a class="btn" href="{{ launcher_url }}log" target="_blank">詳しいログを見る</a>
             </div>
-          </section>
-        {% endif -%}
+          {% endif -%}
+        </section>
 
         <section class="sec">
           <div class="label">タスク <span class="mono">{{ state.task_index }}</span></div>
@@ -445,9 +439,6 @@
               <span class="cam-jitter mono">Δ -- ms</span>
             </div>
             {% endfor -%}
-            <div class="stream-alert" id="camera-alert">
-              ⚠ 映像が届いていないカメラがあります（USB を確認してください）
-            </div>
           </div>
 
           <div class="camera-stats" id="ker-panel" hidden>
@@ -471,20 +462,15 @@
           </div>
 
           <div class="camera-stats arm-temps" id="arm-health-panel" hidden>
-            <div class="camera-stats-title">モーター温度・状態</div>
-            <div class="temp-sides">
-              {% for side in ["left", "right"] -%}
-              <div class="temp-side" data-arm="{{ side }}">
-                <div class="temp-side-title">
-                  {{ "左" if side == "left" else "右" }}<span class="bus-badge">BUS --</span>
-                </div>
-                <div class="temp-head">
-                  <span>関節</span><span>MOS</span><span>ローター</span><span>状態</span>
-                </div>
-                <div class="temp-rows"></div>
-              </div>
-              {% endfor -%}
+            <div class="camera-stats-title">モーター・CAN バス</div>
+            {% for side in ["left", "right"] -%}
+            <div class="arm-line" data-arm="{{ side }}">
+              <span class="cam-name">{{ "左" if side == "left" else "右" }}</span>
+              <span class="bus-badge mono">BUS --</span>
+              <span class="hottest mono unknown">--</span>
+              <span class="faults"></span>
             </div>
+            {% endfor -%}
           </div>
         </section>
       </aside>
@@ -879,6 +865,51 @@
         }, CONNECTION_LOST_AFTER_MS);
       };
 
+      // Live warnings from the health streams, listed in the errors
+      // section (shown while there are any, or any server errors).
+      const hasServerErrors = {{ "true" if state.errors else "false" }};
+      const liveAlerts = new Map();  // key -> { level: "error"|"warn", text }
+      const renderAlerts = () => {
+        const items = [...liveAlerts.values()].sort(
+          (a, b) => (a.level === "error" ? 0 : 1) - (b.level === "error" ? 0 : 1)
+        );
+        document.getElementById("live-alerts").replaceChildren(
+          ...items.map((a) => {
+            const li = document.createElement("li");
+            li.className = a.level;
+            li.textContent = a.text;
+            return li;
+          })
+        );
+        document.getElementById("error-panel").hidden =
+          !hasServerErrors && liveAlerts.size === 0;
+      };
+      // level null clears the key.
+      const setAlert = (key, level, text) => {
+        const old = liveAlerts.get(key);
+        if (!level) {
+          if (!liveAlerts.delete(key)) return;
+        } else {
+          if (old && old.level === level && old.text === text) return;
+          liveAlerts.set(key, { level, text });
+        }
+        renderAlerts();
+      };
+
+      // A rate row's alert: silent, under the rate, or jittery.
+      const rateAlert = (key, name, s, fpsMin, jitterWarn, jitterError, silentHint = "") => {
+        if (!s || s.fps <= 0) {
+          setAlert(key, "error", `${name}: 届いていません${silentHint}`);
+        } else if (s.fps < fpsMin || s.jitter_ms > jitterError) {
+          setAlert(key, "error",
+            `${name}: ${s.fps.toFixed(1)} Hz, Δ ${s.jitter_ms.toFixed(1)} ms`);
+        } else if (s.jitter_ms > jitterWarn) {
+          setAlert(key, "warn", `${name}: Δ ${s.jitter_ms.toFixed(1)} ms`);
+        } else {
+          setAlert(key, null);
+        }
+      };
+
       const FPS_ERROR = 20;
       const JITTER_WARN_MS = 10;
       const JITTER_ERROR_MS = 30;
@@ -890,10 +921,17 @@
         // the rows stay hidden instead of reading "-- Hz" forever.
         for (const row of document.querySelectorAll("[data-cam]")) {
           row.hidden = !(row.dataset.cam in stats);
+          const key = "cam:" + row.dataset.cam;
+          if (row.hidden) {
+            setAlert(key, null);
+            continue;
+          }
+          const name = "カメラ " + row.querySelector(".cam-name").textContent;
+          rateAlert(key, name, stats[row.dataset.cam],
+            FPS_ERROR, JITTER_WARN_MS, JITTER_ERROR_MS, "（USB を確認してください）");
         }
         document.getElementById("camera-panel").hidden =
           Object.keys(stats).length === 0;
-        let stale = 0;
         for (const [cam, s] of Object.entries(stats)) {
           const row = document.querySelector(`[data-cam="${cam}"]`);
           if (!row) continue;
@@ -904,7 +942,6 @@
             jitterEl.textContent = "Δ -- ms";
             row.classList.add("stale");
             row.classList.remove("warn", "error");
-            stale += 1;
             continue;
           }
           row.classList.remove("stale");
@@ -915,8 +952,6 @@
           row.classList.toggle("error", isError);
           row.classList.toggle("warn", isWarn);
         }
-        document.getElementById("camera-alert").style.display =
-          stale > 0 ? "block" : "none";
       };
 
       // Live camera view: one WebSocket carries the picked view's cameras
@@ -1020,6 +1055,8 @@
       vrStatsSource.onmessage = (e) => {
         const s = JSON.parse(e.data);
         document.getElementById("vr-panel").hidden = !s.present;
+        if (s.present) rateAlert("vr", "VR", s, VR_FPS_ERROR, VR_JITTER_WARN_MS, VR_JITTER_ERROR_MS);
+        else setAlert("vr", null);
         const row = document.querySelector('[data-vr="vr_rx"]');
         if (!row) return;
         const fpsEl = row.querySelector(".cam-fps");
@@ -1048,6 +1085,8 @@
       kerStatsSource.onmessage = (e) => {
         const s = JSON.parse(e.data);
         document.getElementById("ker-panel").hidden = !s.present;
+        if (s.present) rateAlert("ker", "KER", s, KER_FPS_ERROR, KER_JITTER_WARN_MS, KER_JITTER_ERROR_MS);
+        else setAlert("ker", null);
         const row = document.querySelector('[data-ker="ker_rx"]');
         if (!row) return;
         const name = document.querySelector("#ker-panel .device-name");
@@ -1081,43 +1120,10 @@
       const tempClass = (c) =>
         c <= TEMP_OK_MAX ? "ok" : c <= TEMP_WARM_MAX ? "warm" : "hot";
 
-      const setTemp = (cell, celsius) => {
-        if (!cell) return;
-        cell.classList.remove("ok", "warm", "hot", "unknown");
-        if (celsius === undefined || celsius === null) {
-          cell.textContent = "--";
-          cell.classList.add("unknown");
-          return;
-        }
-        cell.textContent = celsius + "°C";
-        cell.classList.add(tempClass(celsius));
-      };
-
       // DISABLED is torque off, not a fault; only the motor's own error
       // codes and a motor that stopped answering are worth a colour.
       const NORMAL_MOTOR_STATUS = ["ENABLED", "DISABLED"];
-
-      const setMotorStatus = (cell, status) => {
-        if (!cell) return;
-        cell.classList.remove("enabled", "fault", "silent");
-        if (!status) {
-          cell.textContent = "--";
-          return;
-        }
-        cell.textContent = status;
-        if (status === "SILENT") cell.classList.add("silent");
-        else if (status === "ENABLED") cell.classList.add("enabled");
-        else if (!NORMAL_MOTOR_STATUS.includes(status)) cell.classList.add("fault");
-      };
-
-      const setBusBadge = (panel, bus) => {
-        const badge = panel.querySelector(".bus-badge");
-        if (!badge || !bus) return;
-        badge.classList.remove("ok", "warn", "error");
-        badge.textContent =
-          "BUS " + bus.state + (bus.count > 0 ? " \u00d7" + bus.count : "");
-        if (bus.severity !== "unknown") badge.classList.add(bus.severity);
-      };
+      const ARM_NAME = { left: "左", right: "右" };
 
       // Joints are named from the data rather than baked into the page. The
       // last axis is always the gripper -- OpenArm's motor count is fixed
@@ -1125,22 +1131,17 @@
       // depend on which.
       const jointLabel = (i, count) => (i === count - 1 ? "GRIP" : "J" + (i + 1));
 
-      const syncRows = (panel, count) => {
-        const host = panel.querySelector(".temp-rows");
-        if (host.children.length === count) return;
-        host.replaceChildren();
-        for (let i = 0; i < count; i++) {
-          const row = document.createElement("div");
-          row.className = "temp-row";
-          row.dataset.joint = i;
-          row.innerHTML =
-            '<span class="joint"></span>' +
-            '<span class="mos unknown">--</span>' +
-            '<span class="rotor unknown">--</span>' +
-            '<span class="mstatus">--</span>';
-          row.querySelector(".joint").textContent = jointLabel(i, count);
-          host.append(row);
-        }
+      const setBusBadge = (line, bus) => {
+        const badge = line.querySelector(".bus-badge");
+        badge.classList.remove("ok", "warn", "error");
+        if (!bus) return;
+        badge.textContent =
+          "BUS " + bus.state + (bus.count > 0 ? " \u00d7" + bus.count : "");
+        if (bus.severity !== "unknown") badge.classList.add(bus.severity);
+      };
+
+      const clearArmAlerts = (side) => {
+        for (const kind of ["bus", "temp", "faults"]) setAlert(`arm:${side}:${kind}`, null);
       };
 
       const armHealthSource = new EventSource("/arm-health");
@@ -1149,26 +1150,53 @@
         const anyPresent = Object.values(health).some((s) => s.present);
         document.getElementById("arm-health-panel").hidden = !anyPresent;
         for (const [side, s] of Object.entries(health)) {
-          const panel = document.querySelector(`[data-arm="${side}"]`);
-          if (!panel) continue;
-          panel.hidden = !s.present;
-          const count = Math.max(
-            s.mos?.length ?? 0,
-            s.motor_status?.length ?? 0,
-          );
-          syncRows(panel, count);
-          setBusBadge(panel, s.bus);
-          for (const row of panel.querySelectorAll(".temp-row")) {
-            const i = Number(row.dataset.joint);
-            const status = s.motor_status?.[i];
-            // A motor that stopped answering keeps its last reported
-            // temperature in the driver, so showing it would present a
-            // stale reading as a current one.
-            const silent = status === "SILENT";
-            setTemp(row.querySelector(".mos"), silent ? null : s.mos?.[i]);
-            setTemp(row.querySelector(".rotor"), silent ? null : s.rotor?.[i]);
-            setMotorStatus(row.querySelector(".mstatus"), status);
+          const line = document.querySelector(`[data-arm="${side}"]`);
+          if (!line) continue;
+          line.hidden = !s.present;
+          if (!s.present) {
+            clearArmAlerts(side);
+            continue;
           }
+          const arm = ARM_NAME[side] + "アーム";
+          setBusBadge(line, s.bus);
+          const severity = s.bus?.severity;
+          setAlert(`arm:${side}:bus`,
+            severity === "error" || severity === "warn" ? severity : null,
+            `${arm} CAN バス: ${s.bus?.state}`);
+
+          // Hottest answering motor. A silent motor keeps its last reading
+          // in the driver, so that would be a stale value.
+          const count = Math.max(s.mos?.length ?? 0, s.motor_status?.length ?? 0);
+          let hottest = null;
+          const faults = [];
+          for (let i = 0; i < count; i++) {
+            const status = s.motor_status?.[i];
+            if (status && !NORMAL_MOTOR_STATUS.includes(status)) {
+              faults.push({ joint: jointLabel(i, count), status });
+            }
+            if (status === "SILENT") continue;
+            const temps = [s.mos?.[i], s.rotor?.[i]].filter((t) => t != null);
+            if (!temps.length) continue;
+            const t = Math.max(...temps);
+            if (!hottest || t > hottest.t) hottest = { joint: jointLabel(i, count), t };
+          }
+          const hot = line.querySelector(".hottest");
+          hot.classList.remove("ok", "warm", "hot", "unknown");
+          hot.textContent = hottest ? `${hottest.joint} ${hottest.t}°C` : "--";
+          hot.classList.add(hottest ? tempClass(hottest.t) : "unknown");
+          setAlert(`arm:${side}:temp`,
+            hottest && hottest.t > TEMP_WARM_MAX ? "error" : null,
+            hottest ? `${arm} ${hottest.joint}: ${hottest.t}°C` : "");
+
+          const faultsEl = line.querySelector(".faults");
+          faultsEl.replaceChildren(...faults.map((f) => {
+            const span = document.createElement("span");
+            span.className = f.status === "SILENT" ? "silent" : "fault";
+            span.textContent = `${f.joint} ${f.status} `;
+            return span;
+          }));
+          setAlert(`arm:${side}:faults`, faults.length ? "error" : null,
+            `${arm} ` + faults.map((f) => `${f.joint} ${f.status}`).join(", "));
         }
       };
     </script>
