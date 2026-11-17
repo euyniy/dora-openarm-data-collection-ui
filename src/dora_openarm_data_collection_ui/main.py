@@ -19,18 +19,23 @@ import asyncio
 import collections
 from contextlib import asynccontextmanager
 import dataclasses
+import itertools
 import datetime
 import dora
 import json
 from collections.abc import AsyncIterable
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
 import os
 import pathlib
 import pyarrow as pa
+import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uvicorn
 import yaml
 
@@ -42,13 +47,41 @@ node = None
 auto_open = False
 port = None
 
+# The desktop launcher that supervises `dora run`. The task screen sends the
+# operator back to it when this dataflow dies, so that the failure is shown
+# on screen instead of only in a terminal.
+launcher_url = "http://127.0.0.1:8080/"
+
+# Operation manual shown on the task screen (see --manual-file).
+manual = None
+
+# Where the reference videos of the tasks are (see --reference-video-dir):
+# <dir>/<task set>/<task number from 1>/<any name>.mp4, or the file that
+# tasks[].reference_video names.
+DEFAULT_REFERENCE_VIDEO_DIR = pathlib.Path("metadatas/task-reference")
+reference_video_dir = DEFAULT_REFERENCE_VIDEO_DIR
+REFERENCE_VIDEO_SUFFIXES = (".mp4", ".m4v", ".webm", ".mov")
+# The id of the task set being recorded: the metadata's task_set, or the
+# metadata file's name.
+task_set = ""
+
+
+# Browser openers, most specific first. "open" is macOS, "xdg-open" is Linux.
+_BROWSER_COMMANDS = ("xdg-open", "gio", "open")
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Open a Web browser automatically if requested."""
     if auto_open:
         url = f"http://127.0.0.1:{port}"
-        await asyncio.create_subprocess_exec("open", url)
+        for command in _BROWSER_COMMANDS:
+            argv = [command, "open", url] if command == "gio" else [command, url]
+            try:
+                await asyncio.create_subprocess_exec(*argv)
+                break
+            except (FileNotFoundError, OSError):
+                continue
     yield
 
 
@@ -61,14 +94,56 @@ class State:
 
     collecting: bool = False
     running: bool = True
+    ending: bool = False
+    quit_requested: bool = False
     episode_number: int = 0
     task_index: int = 0
     task_title: str = ""
+    # The dataset language instruction (tasks[].prompt), kept even when
+    # task_title shows the Japanese tasks[].prompt_ja.
+    task_prompt: str = ""
+    task_description: str = ""
+    # task_description split into start / done / reset, or None when it
+    # doesn't follow that pattern.
+    task_steps: dict | None = None
+    # Videos of the task done right (tasks[].reference_video, or every video
+    # in the task's numbered folder): URLs, or paths that /reference-video
+    # serves. Several are tiled. Display only.
+    task_reference_videos: list = dataclasses.field(default_factory=list)
+    # The reference video named by the task but not found: shown as a quiet
+    # note, since recording works without it (the NAS may be unmounted).
+    task_reference_missing: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
+    # Failures to show in red on the task screen: newest last.
+    # [{"time", "source", "message", "count"}]
+    errors: list = dataclasses.field(default_factory=list)
 
 
 state = State()
+
+# Keep the newest failures only; the launcher log has the full history.
+MAX_ERRORS = 20
+
+
+def _record_error(source, message):
+    """Remember a failure for the task screen. Returns True when it is new."""
+    message = " ".join(str(message).split())
+    if not message:
+        return False
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    for error in state.errors:
+        if error["message"] == message:
+            # A repeating failure updates its counter instead of piling up.
+            error["count"] += 1
+            error["time"] = now
+            return False
+    state.errors.append(
+        {"time": now, "source": str(source), "message": message, "count": 1}
+    )
+    del state.errors[:-MAX_ERRORS]
+    return True
+
 
 _state_changed = asyncio.Condition()
 
@@ -86,6 +161,46 @@ CAMERA_INPUTS = (
 
 CAMERA_TIMESTAMP_WINDOW = 60
 CAMERA_STALE_AFTER_S = 1.0
+
+# Cameras shown live to the operator, by view: one head camera, the head
+# with both wrists, or all five. Only the picked view's cameras are sent,
+# since every camera shown costs browser CPU on the same PC that records.
+CAMERA_VIEWS = {
+    "head": ("camera_head_left",),
+    "wrists": ("camera_head_left", "camera_wrist_left", "camera_wrist_right"),
+    "all": (
+        "camera_head_left",
+        "camera_head_right",
+        "camera_ceiling",
+        "camera_wrist_left",
+        "camera_wrist_right",
+    ),
+}
+CAMERA_VIEW_DEFAULT = "head"
+CAMERA_VIEW_INPUTS = CAMERA_VIEWS["all"]
+
+# The live view is a preview, so it is sent at a fraction of the camera rate
+# (see --camera-view-fps). 0 turns it off.
+camera_view_fps = 10.0
+
+# The newest JPEG of each viewed camera, kept as the Arrow array it arrived
+# in. It is only turned into bytes when a frame is actually sent, so storing
+# every 30 fps frame costs nothing.
+latest_frames: dict[str, pa.Array] = {}
+# Bumped on every stored frame, so a sender can tell a new frame from the
+# one it already sent.
+frame_seq: dict[str, int] = {name: 0 for name in CAMERA_VIEW_INPUTS}
+# When this node last got a frame from each viewed camera (time.monotonic()).
+# This is the time of receipt, not the frame's dora timestamp, so the event
+# loop falling behind (both arms report at 250 Hz once started) cannot make a
+# camera that is still delivering look disconnected.
+frame_received_at: dict[str, float] = {}
+# A tile shows 映像なし only once its camera has sent nothing for this long,
+# which is far longer than any gap a working camera at 30 fps leaves.
+CAMERA_VIEW_SILENT_AFTER_S = 2.0
+# How often /cameras repeats which cameras are live, so a tile turns to
+# 映像なし even though no frame will come to tell it.
+CAMERA_VIEW_STATUS_INTERVAL_S = 0.5
 
 # dora-openarm status inputs, one per arm. The input id matches the State field
 ARM_STATUS_INPUTS = ("arm_status_right", "arm_status_left")
@@ -141,6 +256,22 @@ camera_timestamps: dict[str, collections.deque] = {
 vr_stats = StreamStats()
 vr_timestamps: collections.deque = collections.deque(maxlen=VR_TIMESTAMP_WINDOW)
 
+# How late each frame arrives: receipt time minus its dora timestamp, in ms.
+# That is the transport and queue delay, not the camera's own capture delay.
+camera_latency_ms: dict[str, collections.deque] = {
+    name: collections.deque(maxlen=CAMERA_TIMESTAMP_WINDOW) for name in CAMERA_INPUTS
+}
+
+# Arrival times of each arm's state. Its rate and jitter stand in for the CAN
+# loop's timing, which nothing measures directly. Computed per snapshot, not
+# per message, since the state arrives at 250 Hz.
+ARM_STATE_TIMESTAMP_WINDOW = 250
+ARM_STATE_STALE_AFTER_S = 1.0
+arm_state_timestamps: dict[str, collections.deque] = {
+    side: collections.deque(maxlen=ARM_STATE_TIMESTAMP_WINDOW)
+    for side in ARM_STATE_INPUTS.values()
+}
+
 ker_stats = StreamStats()
 ker_timestamps: collections.deque = collections.deque(maxlen=KER_TIMESTAMP_WINDOW)
 ker_device: dict = {}
@@ -188,6 +319,15 @@ BUS_COUNTER_SEVERITY = (
 )
 
 
+def _event_field(event, name, default=None):
+    """Read a field from a dora event, which only supports __getitem__."""
+    try:
+        value = event[name]
+    except (KeyError, TypeError, AttributeError):
+        return default
+    return default if value is None else value
+
+
 def _event_ts_to_seconds(ts) -> float:
     """Normalize a dora event timestamp (datetime or ns int) to POSIX seconds."""
     if isinstance(ts, datetime.datetime):
@@ -219,6 +359,28 @@ def _fold_arrival(series, stats, ts_s: float, stale_after_s: float) -> None:
     stats.jitter_ms = (max(diffs) - min(diffs)) * 1e3
 
 
+def _series_rate(series, now: float, stale_after_s: float) -> tuple[float, float]:
+    """Return (Hz, jitter in ms) of arrival times, or (0, 0) when stale."""
+    if len(series) < 2 or now - series[-1] > stale_after_s:
+        return 0.0, 0.0
+    span = series[-1] - series[0]
+    if span <= 0:
+        return 0.0, 0.0
+    shortest = longest = series[1] - series[0]
+    for previous, current in zip(series, itertools.islice(series, 1, None), strict=False):
+        gap = current - previous
+        shortest = min(shortest, gap)
+        longest = max(longest, gap)
+    return (len(series) - 1) / span, (longest - shortest) * 1e3
+
+
+def _add_arrival(series, ts_s: float, stale_after_s: float) -> None:
+    """Append an arrival time, restarting the window after a stall."""
+    if series and ts_s - series[-1] > stale_after_s:
+        series.clear()
+    series.append(ts_s)
+
+
 def _update_camera_stats(event_id: str, ts_s: float) -> None:
     _fold_arrival(
         camera_timestamps[event_id],
@@ -226,6 +388,32 @@ def _update_camera_stats(event_id: str, ts_s: float) -> None:
         ts_s,
         CAMERA_STALE_AFTER_S,
     )
+
+
+def _store_camera_frame(event_id: str, value, metadata) -> None:
+    """Keep the newest frame of a viewed camera for /cameras."""
+    if event_id not in CAMERA_VIEW_INPUTS or camera_view_fps <= 0:
+        return
+    # Every robot module sends JPEG today; anything else would need decoding,
+    # which this node deliberately does not do.
+    if metadata.get("encoding", "jpeg") not in ("jpeg", "jpg", "jpe"):
+        return
+    latest_frames[event_id] = value
+    frame_seq[event_id] += 1
+    frame_received_at[event_id] = time.monotonic()
+
+
+def _camera_view_status() -> dict[str, bool]:
+    """Whether each viewed camera is delivering, keyed by input id.
+
+    A camera that never sent a frame is left out: this dataflow did not wire
+    it, so its tile stays hidden rather than reading 映像なし forever.
+    """
+    now = time.monotonic()
+    return {
+        name: now - received_at <= CAMERA_VIEW_SILENT_AFTER_S
+        for name, received_at in frame_received_at.items()
+    }
 
 
 def _update_arm_health(side: str, value) -> None:
@@ -345,12 +533,113 @@ async def _notify_state_changed() -> None:
         _state_changed.notify_all()
 
 
+def apply_task(index):
+    """Show the task at the given index, in Japanese when the metadata has it."""
+    task = tasks[index]
+    state.task_index = index
+    # prompt_ja / description_ja are display only: prompt stays English so the
+    # recorded dataset keeps its language instruction.
+    state.task_title = task.get("prompt_ja") or task.get("prompt", "")
+    state.task_prompt = task.get("prompt", "")
+    state.task_description = task.get("description_ja") or task.get("description", "")
+    state.task_steps = split_description(state.task_description)
+    video = str(task.get("reference_video") or "").strip()
+    found = reference_video_files(index)
+    if _is_url(video):
+        state.task_reference_videos = [video]
+    else:
+        # The URL differs per file, so the browser never plays a cached video
+        # of another task set (or an older file) at the same index.
+        state.task_reference_videos = [
+            f"/reference-video/{index}/{number}?v="
+            + urllib.parse.quote(f"{task_set}/{path.name}/{_mtime(path)}")
+            for number, path in enumerate(found)
+        ]
+    state.task_reference_missing = video if video and not _is_url(video) and not found else ""
+
+
+# Folded YAML joins Japanese lines with a space: drop spaces between
+# non-ASCII characters.
+_CJK_SPACE = re.compile(r"(?<=[^\x00-\x7f]) +(?=[^\x00-\x7f])")
+_DESCRIPTION_PATTERNS = (
+    re.compile(
+        r"(?:初期状態[:：]\s*)?(?P<start>.*?)"
+        r"(?:\s*完了状態[:：]\s*(?P<done>.*?))?"
+        r"(?:\s*次の周を始める前に[、,]?\s*(?P<reset>.*))?",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?:Initial state:\s*)?(?P<start>.*?)"
+        r"(?:\s*Done when\s+(?P<done>.*?))?"
+        r"(?:\s*(?P<reset>Before repeating.*))?",
+        re.DOTALL,
+    ),
+)
+
+
+def split_description(text):
+    """Split a task description into start / done / reset texts.
+
+    Returns None when the description has none of the markers, so the
+    caller shows it as one paragraph.
+    """
+    text = _CJK_SPACE.sub("", text.strip())
+    for pattern in _DESCRIPTION_PATTERNS:
+        match = pattern.fullmatch(text)
+        steps = {k: v for k, v in match.groupdict().items() if v}
+        if steps.get("done") or steps.get("reset") or match.start("start") > 0:
+            if "done" in steps:
+                steps["done"] = steps["done"][0].upper() + steps["done"][1:]
+            return steps
+    return None
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _is_url(value):
+    return value.startswith(("http://", "https://"))
+
+
+def reference_video_files(index):
+    """Return the files of the reference videos of the task at `index`.
+
+    A task's `reference_video` is a URL, which the browser plays as is, or a
+    file name in reference_video_dir. Without it, every video file in
+    <reference_video_dir>/<task set>/<index + 1>/ is the task's, in name
+    order, so a folder of numbered folders gives every task of a set its
+    videos. /reference-video serves the files.
+    """
+    video = str(tasks[index].get("reference_video") or "").strip()
+    if _is_url(video):
+        return []
+    if video:
+        path = reference_video_dir / video
+        return [path] if path.is_file() else []
+    folder = reference_video_dir / task_set / str(index + 1)
+    try:
+        files = sorted(folder.iterdir())
+    except OSError:
+        return []
+    return [
+        path
+        for path in files
+        if path.suffix.lower() in REFERENCE_VIDEO_SUFFIXES
+        and not path.name.startswith(".")
+        and path.is_file()
+    ]
+
+
 def next_task():
     """Update the state with the next task."""
-    state.task_index += 1
-    if state.task_index >= len(tasks):
-        state.task_index = 0
-    state.task_title = tasks[state.task_index]["prompt"]
+    index = state.task_index + 1
+    if index >= len(tasks):
+        index = 0
+    apply_task(index)
 
 
 def _command_start():
@@ -384,10 +673,36 @@ def _command_fail():
     next_task()
 
 
-def _command_quit():
-    """Quit this data collection."""
+def _notify_launcher_session_ending():
+    """Tell the supervising launcher this UI session is ending."""
+    session_id = os.getenv("LAUNCHER_SESSION_ID")
+    if not session_id:
+        return True  # The UI can also be run directly, outside the launcher.
+    request = urllib.request.Request(
+        launcher_url.rstrip("/") + "/session/end",
+        data=json.dumps({"session_id": session_id}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            return response.status == 202 and result.get("accepted") is True
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+async def _command_quit():
+    """Request launcher shutdown, then let Dora close the collection flow."""
+    if state.quit_requested:
+        return True
+    state.quit_requested = True
+    state.ending = True
+    launcher_notified = await asyncio.to_thread(_notify_launcher_session_ending)
     node.send_output("command", pa.array(["quit"]))
     state.running = False
+    await _notify_state_changed()
+    return launcher_notified
 
 
 def _command_arm_start():
@@ -406,8 +721,40 @@ def _root(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="root.html",
-        context={"state": state, "state_version": state_version},
+        context={
+            "state": state,
+            "state_version": state_version,
+            "manual": manual,
+            "launcher_url": launcher_url,
+            "camera_view_enabled": camera_view_fps > 0,
+            # Rendered into the tiles so that the reload after every state
+            # change (an arm starting, say) keeps them as they were.
+            "camera_view_status": _camera_view_status(),
+            "camera_views": CAMERA_VIEWS,
+            "camera_view_default": CAMERA_VIEW_DEFAULT,
+            "launcher_session_id_json": json.dumps(os.getenv("LAUNCHER_SESSION_ID") or ""),
+        },
     )
+
+
+@app.post("/api/error")
+async def _api_error(request: Request):
+    """Accept a failure from outside (the launcher forwards dataflow output)."""
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = {}
+    if _record_error(payload.get("source", "dataflow"), payload.get("message", "")):
+        await _notify_state_changed()
+    return {"ok": True}
+
+
+@app.post("/errors/clear")
+async def _clear_errors(request: Request):
+    """Clear the failures shown on the task screen."""
+    state.errors.clear()
+    await _notify_state_changed()
+    return RedirectResponse(request.url_for("_root"), 303)
 
 
 @app.post("/start")
@@ -442,6 +789,16 @@ def _cancel(request: Request):
     state.collecting = False
     state.episode_number += 1
     return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.get("/reference-video/{index}/{number}")
+def _reference_video(index: int, number: int):
+    """Serve a reference video file of a task (seekable: Range requests work)."""
+    files = reference_video_files(index) if 0 <= index < len(tasks) else []
+    if not 0 <= number < len(files):
+        return Response(status_code=404)
+    # The same URL can mean another file after the task set changes.
+    return FileResponse(files[number], headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/events", response_class=EventSourceResponse)
@@ -483,9 +840,14 @@ async def _stats() -> AsyncIterable[ServerSentEvent]:
                 continue
             series = camera_timestamps[name]
             if not series or now - series[-1] > CAMERA_STALE_AFTER_S:
-                snapshot[name] = {"fps": 0.0, "jitter_ms": 0.0}
+                snapshot[name] = {"fps": 0.0, "jitter_ms": 0.0, "latency_ms": 0.0}
             else:
-                snapshot[name] = {"fps": s.fps, "jitter_ms": s.jitter_ms}
+                latency = camera_latency_ms[name]
+                snapshot[name] = {
+                    "fps": s.fps,
+                    "jitter_ms": s.jitter_ms,
+                    "latency_ms": sum(latency) / len(latency) if latency else 0.0,
+                }
         yield ServerSentEvent(data=snapshot)
         await asyncio.sleep(0.5)
 
@@ -533,8 +895,13 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
             fresh = health.updated_at and now - health.updated_at <= (
                 ARM_TEMPERATURE_STALE_AFTER_S
             )
+            fps, jitter_ms = _series_rate(
+                arm_state_timestamps[side], now, ARM_STATE_STALE_AFTER_S
+            )
             snapshot[side] = {
                 "present": f"arm_state_{side}" in seen_inputs,
+                "fps": fps,
+                "jitter_ms": jitter_ms,
                 "mos": health.mos if fresh else [],
                 "rotor": health.rotor if fresh else [],
                 "motor_status": health.motor_status if fresh else [],
@@ -546,10 +913,55 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
         await asyncio.sleep(0.5)
 
 
+@app.websocket("/cameras")
+async def _cameras(websocket: WebSocket):
+    """Push each viewed camera's newest frame and whether it is live.
+
+    `?view=` picks the cameras sent (CAMERA_VIEWS); the page reconnects
+    when the operator switches views.
+
+    Frames are binary messages: the camera's name, a newline, the JPEG.
+    Every CAMERA_VIEW_STATUS_INTERVAL_S a text message carries
+    _camera_view_status() as JSON for every camera, including those not
+    shown, so the other views' buttons can warn about a dead camera; it
+    alone decides 映像なし.
+
+    One socket carries every camera: the page already holds five SSE
+    streams, and one MJPEG stream per camera would exhaust the browser's six
+    connections per host. Only the newest frame is ever sent, so a slow
+    browser skips frames instead of backing them up in this node, whose
+    event loop also serves the dora inputs.
+    """
+    await websocket.accept()
+    if camera_view_fps <= 0:
+        await websocket.close()
+        return
+    view = websocket.query_params.get("view", CAMERA_VIEW_DEFAULT)
+    names = CAMERA_VIEWS.get(view, CAMERA_VIEWS[CAMERA_VIEW_DEFAULT])
+    sent = {name: 0 for name in names}
+    status_sent_at = 0.0
+    try:
+        while state.running:
+            now = time.monotonic()
+            if now - status_sent_at >= CAMERA_VIEW_STATUS_INTERVAL_S:
+                status_sent_at = now
+                await websocket.send_text(json.dumps(_camera_view_status()))
+            for name in names:
+                seq = frame_seq[name]
+                if seq == sent[name] or name not in latest_frames:
+                    continue
+                sent[name] = seq
+                jpeg = latest_frames[name].to_numpy(zero_copy_only=False).tobytes()
+                await websocket.send_bytes(name.encode() + b"\n" + jpeg)
+            await asyncio.sleep(1.0 / camera_view_fps)
+    except WebSocketDisconnect:
+        pass
+
+
 @app.post("/quit")
-def _quit(request: Request):
-    _command_quit()
-    return RedirectResponse(request.url_for("_root"), 303)
+async def _quit():
+    launcher_notified = await _command_quit()
+    return {"accepted": True, "launcher_notified": launcher_notified}
 
 
 @app.post("/arm/start")
@@ -568,8 +980,36 @@ def _arm_stop(request: Request):
 
 def load_yaml(path):
     """Load a YAML file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_manual(path):
+    """Load the operation manual shown on the task screen.
+
+    The file is YAML:
+
+        title: 操作マニュアル
+        sections:
+          - title: アームの同期手順
+            steps: ["...", "..."]
+            note: "..."
+    """
+    if not path:
+        return None
+    path = pathlib.Path(path)
+    if not path.exists():
+        _record_error("ui", f"操作マニュアルが見つかりません: {path}")
+        return None
+    try:
+        loaded = load_yaml(path)
+    except yaml.YAMLError as error:
+        _record_error("ui", f"操作マニュアルを読み込めません: {error}")
+        return None
+    if not isinstance(loaded, dict) or not loaded.get("sections"):
+        _record_error("ui", f"操作マニュアルに sections がありません: {path}")
+        return None
+    return loaded
 
 
 async def _main_uvicorn(server):
@@ -588,6 +1028,18 @@ async def _main_dora(server):
         event = node.next()
         if event["type"] == "STOP":
             state.running = False
+        elif event["type"] == "ERROR":
+            # Show dora's own failures on the task screen, not just on stderr.
+            _record_error("dora", _event_field(event, "error", "unknown dora error"))
+            await _notify_state_changed()
+        elif event["type"] == "INPUT_CLOSED":
+            # A node that ends while we are still running has died.
+            _record_error(
+                "dora",
+                f"入力 {_event_field(event, 'id', '?')} が停止しました"
+                "（ノードが終了した可能性があります）",
+            )
+            await _notify_state_changed()
         elif event["type"] == "INPUT":
             event_id = event["id"]
             seen_inputs.add(event_id)
@@ -600,10 +1052,10 @@ async def _main_dora(server):
                 )
                 continue
             if event_id in CAMERA_INPUTS:
-                _update_camera_stats(
-                    event_id,
-                    _event_ts_to_seconds(event["metadata"].get("timestamp")),
-                )
+                ts_s = _event_ts_to_seconds(event["metadata"].get("timestamp"))
+                _update_camera_stats(event_id, ts_s)
+                camera_latency_ms[event_id].append((time.time() - ts_s) * 1e3)
+                _store_camera_frame(event_id, event["value"], event["metadata"])
                 continue
             if event_id in ARM_STATUS_INPUTS:
                 value = event["value"][0].as_py()
@@ -615,7 +1067,13 @@ async def _main_dora(server):
             if event_id in ARM_STATE_INPUTS:
                 # Store only. Notifying here would push an SSE frame 250
                 # times a second per arm; /arm-health samples instead.
-                _update_arm_health(ARM_STATE_INPUTS[event_id], event["value"])
+                side = ARM_STATE_INPUTS[event_id]
+                _add_arrival(
+                    arm_state_timestamps[side],
+                    _event_ts_to_seconds(event["metadata"].get("timestamp")),
+                    ARM_STATE_STALE_AFTER_S,
+                )
+                _update_arm_health(side, event["value"])
                 continue
             if event_id in VR_RECEIVE_TIMES_INPUTS:
                 for ts_ns in event["value"].to_pylist():
@@ -639,7 +1097,7 @@ async def _main_dora(server):
                 if event_id == "button_a":
                     _command_start()
                 elif event_id == "button_b":
-                    _command_quit()
+                    await _command_quit()
 
             await _notify_state_changed()
     server.should_exit = True
@@ -665,6 +1123,7 @@ def main():
     """Run data collection control Web application."""
     global node
     global tasks
+    global camera_view_fps
 
     parser = argparse.ArgumentParser(description="Record data as OpenArm dataset")
     parser.add_argument(
@@ -686,14 +1145,48 @@ def main():
         help=f"The port for UI ({default_port})",
         type=int,
     )
+    parser.add_argument(
+        "--manual-file",
+        default=os.getenv("MANUAL_FILE"),
+        help="The operation manual (YAML) shown on the task screen",
+        type=pathlib.Path,
+    )
+    parser.add_argument(
+        "--reference-video-dir",
+        default=os.getenv("REFERENCE_VIDEO_DIR") or DEFAULT_REFERENCE_VIDEO_DIR,
+        help=f"Where the tasks' reference videos are ({DEFAULT_REFERENCE_VIDEO_DIR})",
+        type=pathlib.Path,
+    )
+    default_launcher_url = "http://127.0.0.1:8080/"
+    parser.add_argument(
+        "--launcher-url",
+        default=os.getenv("LAUNCHER_URL", default_launcher_url),
+        help=f"The desktop launcher URL to fall back to on failure ({default_launcher_url})",
+    )
+    parser.add_argument(
+        "--camera-view-fps",
+        default=float(os.getenv("CAMERA_VIEW_FPS", camera_view_fps)),
+        help=f"Live camera view rate, 0 to disable ({camera_view_fps:g})",
+        type=float,
+    )
     args = parser.parse_args()
+    camera_view_fps = args.camera_view_fps
     global auto_open
     auto_open = args.auto_open
     global port
     port = args.port
+    global launcher_url
+    # The template appends paths ("log", "status") to this.
+    launcher_url = args.launcher_url.rstrip("/") + "/"
+    global manual
+    manual = load_manual(args.manual_file)
+    global reference_video_dir
+    reference_video_dir = args.reference_video_dir.expanduser()
     metadata = load_yaml(args.metadata_file)
+    global task_set
+    task_set = str(metadata.get("task_set") or args.metadata_file.stem)
     tasks = metadata["tasks"]
-    state.task_title = tasks[state.task_index]["prompt"]
+    apply_task(state.task_index)
 
     node = dora.Node()
     asyncio.run(_main_async())
