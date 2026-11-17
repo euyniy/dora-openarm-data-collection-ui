@@ -966,12 +966,17 @@
           const key = "cam:" + row.dataset.cam;
           if (row.hidden) {
             setAlert(key, null);
-            setAlert("camlat:" + row.dataset.cam, null);
             continue;
           }
+          // Only a camera that has stopped raises the errors panel. A low
+          // rate, delay or jitter is shown in the row's colours instead.
           const name = "カメラ " + row.querySelector(".cam-name").textContent;
-          rateAlert(key, name, stats[row.dataset.cam],
-            FPS_ERROR, JITTER_WARN_MS, JITTER_ERROR_MS, "（USB を確認してください）");
+          const s = stats[row.dataset.cam];
+          if (!s || s.fps <= 0) {
+            setAlert(key, "error", `${name}: 届いていません（USB を確認してください）`);
+          } else {
+            setAlert(key, null);
+          }
         }
         document.getElementById("camera-panel").hidden =
           Object.keys(stats).length === 0;
@@ -984,7 +989,6 @@
             fpsEl.textContent = "-- Hz";
             jitterEl.textContent = "Δ -- ms";
             row.querySelector(".cam-latency").textContent = "遅延 --";
-            setAlert("camlat:" + cam, null);
             row.classList.add("stale");
             row.classList.remove("warn", "error");
             continue;
@@ -999,8 +1003,6 @@
           latencyEl.textContent = "遅延 " + latency.toFixed(0) + " ms";
           latencyEl.classList.toggle("error", latencyLevel === "error");
           latencyEl.classList.toggle("warn", latencyLevel === "warn");
-          setAlert("camlat:" + cam, latencyLevel,
-            `カメラ ${row.querySelector(".cam-name").textContent}: 遅延 ${latency.toFixed(0)} ms`);
           const isError = s.fps < FPS_ERROR || s.jitter_ms > JITTER_ERROR_MS;
           const isWarn = !isError && s.jitter_ms > JITTER_WARN_MS;
           row.classList.toggle("error", isError);
