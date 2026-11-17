@@ -97,6 +97,19 @@
       .task-step.done { border-color: var(--ok); }
       .task-step.reset { border-color: var(--warn); color: var(--muted); font-size: 12px; }
       .task-prompt { font-size: 12px; color: var(--muted); }
+      /* Reference videos: whole frame (never cropped), two per row when
+         there are several. */
+      .task-reference { display: grid; gap: 4px; }
+      .task-reference-videos { display: grid; gap: 4px; }
+      .task-reference-videos.grid { grid-template-columns: 1fr 1fr; }
+      .task-reference video {
+        width: 100%;
+        max-height: 240px;
+        object-fit: contain;
+        background: #000;
+        display: block;
+      }
+      .task-reference-missing { font-size: 12px; color: var(--muted); }
 
       /* Errors reported to /api/error: only shown while there are any. */
       .errors { border-left: 3px solid var(--bad); }
@@ -420,6 +433,19 @@
           {% endif -%}
           {% if state.task_prompt and state.task_prompt != state.task_title -%}
             <div class="task-prompt">{{ state.task_prompt }}</div>
+          {% endif -%}
+          {% if state.task_reference_videos -%}
+            <div class="task-reference">
+              <div class="label">参考動画</div>
+              <div class="task-reference-videos{{ ' grid' if state.task_reference_videos | length > 1 }}">
+                {% for video in state.task_reference_videos -%}
+                  {# Muted so that the browser lets it autoplay. -#}
+                  <video src="{{ video }}" autoplay muted loop playsinline controls preload="auto"></video>
+                {% endfor -%}
+              </div>
+            </div>
+          {% elif state.task_reference_missing -%}
+            <div class="task-reference-missing">参考動画なし: {{ state.task_reference_missing }}</div>
           {% endif -%}
         </section>
 
