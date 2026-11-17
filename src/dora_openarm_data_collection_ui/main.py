@@ -19,6 +19,7 @@ import asyncio
 import collections
 from contextlib import asynccontextmanager
 import dataclasses
+import itertools
 import datetime
 import dora
 import json
@@ -255,6 +256,22 @@ camera_timestamps: dict[str, collections.deque] = {
 vr_stats = StreamStats()
 vr_timestamps: collections.deque = collections.deque(maxlen=VR_TIMESTAMP_WINDOW)
 
+# How late each frame arrives: receipt time minus its dora timestamp, in ms.
+# That is the transport and queue delay, not the camera's own capture delay.
+camera_latency_ms: dict[str, collections.deque] = {
+    name: collections.deque(maxlen=CAMERA_TIMESTAMP_WINDOW) for name in CAMERA_INPUTS
+}
+
+# Arrival times of each arm's state. Its rate and jitter stand in for the CAN
+# loop's timing, which nothing measures directly. Computed per snapshot, not
+# per message, since the state arrives at 250 Hz.
+ARM_STATE_TIMESTAMP_WINDOW = 250
+ARM_STATE_STALE_AFTER_S = 1.0
+arm_state_timestamps: dict[str, collections.deque] = {
+    side: collections.deque(maxlen=ARM_STATE_TIMESTAMP_WINDOW)
+    for side in ARM_STATE_INPUTS.values()
+}
+
 ker_stats = StreamStats()
 ker_timestamps: collections.deque = collections.deque(maxlen=KER_TIMESTAMP_WINDOW)
 ker_device: dict = {}
@@ -340,6 +357,28 @@ def _fold_arrival(series, stats, ts_s: float, stale_after_s: float) -> None:
     diffs = [series[i] - series[i - 1] for i in range(1, len(series))]
     stats.fps = (len(series) - 1) / span
     stats.jitter_ms = (max(diffs) - min(diffs)) * 1e3
+
+
+def _series_rate(series, now: float, stale_after_s: float) -> tuple[float, float]:
+    """Return (Hz, jitter in ms) of arrival times, or (0, 0) when stale."""
+    if len(series) < 2 or now - series[-1] > stale_after_s:
+        return 0.0, 0.0
+    span = series[-1] - series[0]
+    if span <= 0:
+        return 0.0, 0.0
+    shortest = longest = series[1] - series[0]
+    for previous, current in zip(series, itertools.islice(series, 1, None), strict=False):
+        gap = current - previous
+        shortest = min(shortest, gap)
+        longest = max(longest, gap)
+    return (len(series) - 1) / span, (longest - shortest) * 1e3
+
+
+def _add_arrival(series, ts_s: float, stale_after_s: float) -> None:
+    """Append an arrival time, restarting the window after a stall."""
+    if series and ts_s - series[-1] > stale_after_s:
+        series.clear()
+    series.append(ts_s)
 
 
 def _update_camera_stats(event_id: str, ts_s: float) -> None:
@@ -801,9 +840,14 @@ async def _stats() -> AsyncIterable[ServerSentEvent]:
                 continue
             series = camera_timestamps[name]
             if not series or now - series[-1] > CAMERA_STALE_AFTER_S:
-                snapshot[name] = {"fps": 0.0, "jitter_ms": 0.0}
+                snapshot[name] = {"fps": 0.0, "jitter_ms": 0.0, "latency_ms": 0.0}
             else:
-                snapshot[name] = {"fps": s.fps, "jitter_ms": s.jitter_ms}
+                latency = camera_latency_ms[name]
+                snapshot[name] = {
+                    "fps": s.fps,
+                    "jitter_ms": s.jitter_ms,
+                    "latency_ms": sum(latency) / len(latency) if latency else 0.0,
+                }
         yield ServerSentEvent(data=snapshot)
         await asyncio.sleep(0.5)
 
@@ -851,8 +895,13 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
             fresh = health.updated_at and now - health.updated_at <= (
                 ARM_TEMPERATURE_STALE_AFTER_S
             )
+            fps, jitter_ms = _series_rate(
+                arm_state_timestamps[side], now, ARM_STATE_STALE_AFTER_S
+            )
             snapshot[side] = {
                 "present": f"arm_state_{side}" in seen_inputs,
+                "fps": fps,
+                "jitter_ms": jitter_ms,
                 "mos": health.mos if fresh else [],
                 "rotor": health.rotor if fresh else [],
                 "motor_status": health.motor_status if fresh else [],
@@ -1003,10 +1052,9 @@ async def _main_dora(server):
                 )
                 continue
             if event_id in CAMERA_INPUTS:
-                _update_camera_stats(
-                    event_id,
-                    _event_ts_to_seconds(event["metadata"].get("timestamp")),
-                )
+                ts_s = _event_ts_to_seconds(event["metadata"].get("timestamp"))
+                _update_camera_stats(event_id, ts_s)
+                camera_latency_ms[event_id].append((time.time() - ts_s) * 1e3)
                 _store_camera_frame(event_id, event["value"], event["metadata"])
                 continue
             if event_id in ARM_STATUS_INPUTS:
@@ -1019,7 +1067,13 @@ async def _main_dora(server):
             if event_id in ARM_STATE_INPUTS:
                 # Store only. Notifying here would push an SSE frame 250
                 # times a second per arm; /arm-health samples instead.
-                _update_arm_health(ARM_STATE_INPUTS[event_id], event["value"])
+                side = ARM_STATE_INPUTS[event_id]
+                _add_arrival(
+                    arm_state_timestamps[side],
+                    _event_ts_to_seconds(event["metadata"].get("timestamp")),
+                    ARM_STATE_STALE_AFTER_S,
+                )
+                _update_arm_health(side, event["value"])
                 continue
             if event_id in VR_RECEIVE_TIMES_INPUTS:
                 for ts_ns in event["value"].to_pylist():

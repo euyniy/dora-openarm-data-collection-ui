@@ -143,20 +143,27 @@
       .camera-stats-title { font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
       .stat-row {
         display: grid;
-        grid-template-columns: 1fr 72px 80px;
+        grid-template-columns: 1fr 64px 72px;
         gap: 8px;
         align-items: baseline;
         font-size: 13px;
       }
+      /* Cameras add a latency column. */
+      .stat-row[data-cam] { grid-template-columns: 1fr 64px 72px 72px; }
       .stat-row .cam-fps,
-      .stat-row .cam-jitter { text-align: right; }
+      .stat-row .cam-jitter,
+      .stat-row .cam-latency { text-align: right; }
+      .stat-row .cam-latency { color: var(--muted); }
+      .stat-row .cam-latency.warn { color: var(--warn); }
+      .stat-row .cam-latency.error { color: var(--bad); }
       .stat-row .cam-fps { color: var(--ok); }
       .stat-row .cam-jitter { color: var(--muted); }
       .stat-row.warn .cam-jitter { color: var(--warn); }
       .stat-row.error .cam-fps,
       .stat-row.error .cam-jitter { color: var(--bad); }
       .stat-row.stale .cam-fps,
-      .stat-row.stale .cam-jitter { color: #555; }
+      .stat-row.stale .cam-jitter,
+      .stat-row.stale .cam-latency { color: #555; }
       .device-name { color: var(--muted); font-size: 11px; margin-left: 6px; }
 
       /* Motors: one line per arm -- bus, hottest motor, motors in trouble. */
@@ -168,6 +175,11 @@
         font-size: 13px;
       }
       .arm-line .hottest { text-align: right; }
+      /* State rate: stands in for the CAN loop's timing. */
+      .arm-line .arm-rate { font-size: 12px; color: var(--ok); }
+      .arm-line .arm-rate.warn { color: var(--warn); }
+      .arm-line .arm-rate.error { color: var(--bad); }
+      .arm-line .arm-rate.stale { color: #555; }
       .arm-line .faults { grid-column: 1 / -1; font-size: 12px; font-weight: bold; }
       .arm-line .faults:empty { display: none; }
       .arm-line .faults .fault { color: var(--bad); }
@@ -463,6 +475,7 @@
               <span class="cam-name">{{ label }}</span>
               <span class="cam-fps mono">-- Hz</span>
               <span class="cam-jitter mono">Δ -- ms</span>
+              <span class="cam-latency mono">遅延 --</span>
             </div>
             {% endfor -%}
           </div>
@@ -491,7 +504,7 @@
             <div class="camera-stats-title">モーター・CAN バス</div>
             {% for side in ["left", "right"] -%}
             <div class="arm-line" data-arm="{{ side }}">
-              <span class="cam-name">{{ "左" if side == "left" else "右" }}</span>
+              <span class="cam-name">{{ "左" if side == "left" else "右" }} <span class="arm-rate mono">-- Hz</span></span>
               <span class="bus-badge mono">BUS --</span>
               <span class="hottest mono unknown">--</span>
               <span class="faults"></span>
@@ -937,6 +950,9 @@
       };
 
       const FPS_ERROR = 20;
+      // Receipt minus the frame's dora timestamp: transport and queue delay.
+      const LATENCY_WARN_MS = 50;
+      const LATENCY_ERROR_MS = 100;
       const JITTER_WARN_MS = 10;
       const JITTER_ERROR_MS = 30;
 
@@ -950,6 +966,7 @@
           const key = "cam:" + row.dataset.cam;
           if (row.hidden) {
             setAlert(key, null);
+            setAlert("camlat:" + row.dataset.cam, null);
             continue;
           }
           const name = "カメラ " + row.querySelector(".cam-name").textContent;
@@ -966,6 +983,8 @@
           if (!s || s.fps <= 0) {
             fpsEl.textContent = "-- Hz";
             jitterEl.textContent = "Δ -- ms";
+            row.querySelector(".cam-latency").textContent = "遅延 --";
+            setAlert("camlat:" + cam, null);
             row.classList.add("stale");
             row.classList.remove("warn", "error");
             continue;
@@ -973,6 +992,15 @@
           row.classList.remove("stale");
           fpsEl.textContent = s.fps.toFixed(1) + " Hz";
           jitterEl.textContent = "Δ " + s.jitter_ms.toFixed(1) + " ms";
+          const latencyEl = row.querySelector(".cam-latency");
+          const latency = s.latency_ms ?? 0;
+          const latencyLevel = latency > LATENCY_ERROR_MS ? "error"
+            : latency > LATENCY_WARN_MS ? "warn" : null;
+          latencyEl.textContent = "遅延 " + latency.toFixed(0) + " ms";
+          latencyEl.classList.toggle("error", latencyLevel === "error");
+          latencyEl.classList.toggle("warn", latencyLevel === "warn");
+          setAlert("camlat:" + cam, latencyLevel,
+            `カメラ ${row.querySelector(".cam-name").textContent}: 遅延 ${latency.toFixed(0)} ms`);
           const isError = s.fps < FPS_ERROR || s.jitter_ms > JITTER_ERROR_MS;
           const isWarn = !isError && s.jitter_ms > JITTER_WARN_MS;
           row.classList.toggle("error", isError);
@@ -1166,8 +1194,29 @@
         if (bus.severity !== "unknown") badge.classList.add(bus.severity);
       };
 
+      // The follower reports its state at the leader's rate (250 Hz).
+      const ARM_FPS_ERROR = 100;
+      const ARM_JITTER_WARN_MS = 10;
+      const ARM_JITTER_ERROR_MS = 30;
+
       const clearArmAlerts = (side) => {
-        for (const kind of ["bus", "temp", "faults"]) setAlert(`arm:${side}:${kind}`, null);
+        for (const kind of ["rate", "bus", "temp", "faults"]) setAlert(`arm:${side}:${kind}`, null);
+      };
+
+      const setArmRate = (line, side, s) => {
+        const el = line.querySelector(".arm-rate");
+        el.classList.remove("warn", "error", "stale");
+        if (!s.fps) {
+          el.textContent = "-- Hz";
+          el.classList.add("stale");
+        } else {
+          el.textContent = `${s.fps.toFixed(0)} Hz Δ ${s.jitter_ms.toFixed(1)} ms`;
+          const isError = s.fps < ARM_FPS_ERROR || s.jitter_ms > ARM_JITTER_ERROR_MS;
+          if (isError) el.classList.add("error");
+          else if (s.jitter_ms > ARM_JITTER_WARN_MS) el.classList.add("warn");
+        }
+        rateAlert(`arm:${side}:rate`, ARM_NAME[side] + "アーム 状態", s,
+          ARM_FPS_ERROR, ARM_JITTER_WARN_MS, ARM_JITTER_ERROR_MS);
       };
 
       const armHealthSource = new EventSource("/arm-health");
@@ -1184,6 +1233,7 @@
             continue;
           }
           const arm = ARM_NAME[side] + "アーム";
+          setArmRate(line, side, s);
           setBusBadge(line, s.bus);
           const severity = s.bus?.severity;
           setAlert(`arm:${side}:bus`,
