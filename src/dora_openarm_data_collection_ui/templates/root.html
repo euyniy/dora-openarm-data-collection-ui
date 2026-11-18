@@ -91,11 +91,22 @@
 
       .task-title { font-size: 18px; font-weight: bold; line-height: 1.4; }
       .task-description { color: #bbb; line-height: 1.6; }
-      .task-steps { display: grid; gap: 6px; }
-      .task-step { border-left: 3px solid var(--line); padding-left: 8px; line-height: 1.5; }
-      .task-step .label { margin-bottom: 1px; }
-      .task-step.done { border-color: var(--ok); }
-      .task-step.reset { border-color: var(--warn); color: var(--muted); font-size: 12px; }
+      /* The description, one section per heading (see split_description). */
+      .task-sections { display: grid; gap: 6px; }
+      .task-section {
+        border-left: 3px solid var(--line);
+        border-radius: 0 4px 4px 0;
+        padding: 3px 8px;
+        line-height: 1.5;
+      }
+      .task-section .label { margin-bottom: 1px; }
+      .task-section.warn { border-color: var(--warn); background: rgba(221, 187, 51, 0.12); }
+      .task-section.warn .label { color: var(--warn); font-weight: bold; }
+      .task-section.setup { border-color: var(--accent); }
+      .task-section.setup .label { color: var(--accent); }
+      .task-section.done { border-color: var(--ok); }
+      .task-section.done .label { color: var(--ok); }
+      .task-section.reset { color: var(--muted); font-size: 12px; }
       .task-prompt { font-size: 12px; color: var(--muted); }
       /* Reference videos: whole frame (never cropped), two per row when
          there are several. */
@@ -429,15 +440,15 @@
         <section class="sec">
           <div class="label">タスク <span class="mono">{{ state.task_index }}</span></div>
           <div class="task-title">{{ state.task_title }}</div>
-          {% if state.task_steps -%}
-            <div class="task-steps">
-              {% for key, label in [("start", "開始時"), ("done", "完了条件"), ("reset", "次の周の前に")] -%}
-                {% if state.task_steps[key] -%}
-                  <div class="task-step {{ key }}">
-                    <div class="label">{{ label }}</div>
-                    {{ state.task_steps[key] }}
-                  </div>
-                {% endif -%}
+          {% if state.task_sections -%}
+            <div class="task-sections">
+              {% for section in state.task_sections -%}
+                <div class="task-section {{ section.kind }}">
+                  {% if section.heading -%}
+                    <div class="label">{{ section.heading }}</div>
+                  {% endif -%}
+                  {{ section.text }}
+                </div>
               {% endfor -%}
             </div>
           {% elif state.task_description -%}
