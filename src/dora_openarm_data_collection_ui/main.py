@@ -25,13 +25,20 @@ import dora
 import json
 from collections.abc import AsyncIterable
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
 import os
 import pathlib
 import pyarrow as pa
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -238,6 +245,44 @@ VR_RECEIVE_TIMES_INPUTS = ("vr_receive_times", "vr_recv_ts")
 
 VR_TIMESTAMP_WINDOW = 120  # ~1.6 s of history at 72 Hz
 VR_STALE_AFTER_S = 1.0
+
+# The Cell lifter (dora-openarm-cell-lifter). Its `elevation_observation` is
+# the height in mm, sent on every tick once it has calibrated; the panel
+# appears once one has arrived. `lifter_command` drives it like its joystick:
+# "lifter-up" / "lifter-down" move it until "lifter-stop".
+#
+# The buttons are for a KER leader only. A VR or WebXR leader moves the
+# lifter with its left stick, which it sends with every packet, so a resting
+# stick would cancel a move from the page at once.
+LIFTER_OBSERVATION_INPUT = "elevation_observation"
+LIFTER_COMMANDS = {"up": "lifter-up", "down": "lifter-down", "stop": "lifter-stop"}
+LIFTER_STALE_AFTER_S = 1.0
+# The page repeats up/down every 200 ms while a button is held. Should those
+# stop arriving (the browser closed or lost the connection mid-press), the
+# lifter is stopped here instead of running on to the end of its stroke.
+LIFTER_HOLD_TIMEOUT_S = 0.6
+LIFTER_WATCHDOG_INTERVAL_S = 0.05
+
+
+@dataclasses.dataclass
+class Lifter:
+    """The lifter's last height and the move the task screen holds, if any."""
+
+    elevation_mm: float | None = None
+    updated_at: float = 0.0
+    # "up" or "down" while a button is held, else None.
+    moving: str | None = None
+    hold_until: float = 0.0
+
+
+lifter = Lifter()
+# Routes run in worker threads while the watchdog runs on the event loop.
+_lifter_lock = threading.Lock()
+
+
+def _lifter_controls_enabled():
+    """Whether the page may move the lifter: only under a KER leader."""
+    return KER_POSITION_INPUT in seen_inputs
 
 
 @dataclasses.dataclass
@@ -672,6 +717,8 @@ def next_task():
 
 def _command_start():
     """Start a new episode."""
+    # The height is set between episodes, never while recording.
+    _stop_lifter_if_moving()
     node.send_output(
         "command",
         pa.array(["start"]),
@@ -743,6 +790,57 @@ def _command_arm_stop():
     node.send_output("arm_command", pa.array(["stop"]))
 
 
+def _command_lifter(direction):
+    """Move the lifter "up" or "down" until "stop" or the hold times out.
+
+    A repeated up/down only extends the hold; the lifter is told again
+    only when the direction changes.
+    """
+    if direction == "stop":
+        # Only a move this page started: a stop otherwise would zero a VR
+        # leader's stick for a moment.
+        _stop_lifter_if_moving()
+        return
+    with _lifter_lock:
+        lifter.hold_until = time.monotonic() + LIFTER_HOLD_TIMEOUT_S
+        if lifter.moving == direction:
+            return
+        lifter.moving = direction
+        node.send_output("lifter_command", pa.array([LIFTER_COMMANDS[direction]]))
+
+
+def _stop_lifter_if_moving(expired_only=False):
+    """Stop a move the task screen started, if one is going.
+
+    With `expired_only`, only once its hold has run out: checked under the
+    lock, so a keep-alive that just arrived is never cut short.
+    """
+    with _lifter_lock:
+        if lifter.moving is None:
+            return
+        if expired_only and time.monotonic() <= lifter.hold_until:
+            return
+        lifter.moving = None
+        node.send_output("lifter_command", pa.array([LIFTER_COMMANDS["stop"]]))
+
+
+def _update_lifter_elevation(value) -> None:
+    """Record the lifter's height (mm) from `elevation_observation`."""
+    try:
+        lifter.elevation_mm = float(value[0].as_py())
+        lifter.updated_at = time.time()
+    except (IndexError, TypeError, ValueError):
+        pass
+
+
+async def _lifter_watchdog():
+    """Stop the lifter when the page holding a button stops saying so."""
+    while state.running:
+        if lifter.moving is not None:
+            _stop_lifter_if_moving(expired_only=True)
+        await asyncio.sleep(LIFTER_WATCHDOG_INTERVAL_S)
+
+
 @app.get("/", response_class=HTMLResponse)
 def _root(request: Request):
     """Render the main HTML."""
@@ -760,6 +858,10 @@ def _root(request: Request):
             "camera_view_status": _camera_view_status(),
             "camera_views": CAMERA_VIEWS,
             "camera_view_default": CAMERA_VIEW_DEFAULT,
+            # Rendered for the same reason: the lifter panel would otherwise
+            # blink out until /arm-health's first snapshot.
+            "lifter_present": LIFTER_OBSERVATION_INPUT in seen_inputs,
+            "lifter_controls": _lifter_controls_enabled(),
             "launcher_session_id_json": json.dumps(os.getenv("LAUNCHER_SESSION_ID") or ""),
         },
     )
@@ -817,6 +919,24 @@ def _cancel(request: Request):
     state.collecting = False
     state.episode_number += 1
     return RedirectResponse(request.url_for("_root"), 303)
+
+
+@app.post("/lifter/{direction}")
+def _lifter(direction: str):
+    """Move the lifter while a button is held: up / down, repeated, then stop.
+
+    Refused while recording, so that an episode never has the height
+    change under it, and without a KER leader (see LIFTER_COMMANDS);
+    "stop" is always accepted.
+    """
+    if direction not in LIFTER_COMMANDS:
+        return JSONResponse({"accepted": False, "reason": "unknown"}, status_code=404)
+    if direction != "stop" and not _lifter_controls_enabled():
+        return JSONResponse({"accepted": False, "reason": "not-ker"}, status_code=409)
+    if direction != "stop" and state.collecting:
+        return JSONResponse({"accepted": False, "reason": "collecting"}, status_code=409)
+    _command_lifter(direction)
+    return {"accepted": True}
 
 
 @app.get("/reference-video/{index}/{number}")
@@ -911,14 +1031,27 @@ async def _ker_stats() -> AsyncIterable[ServerSentEvent]:
 
 @app.get("/arm-health", response_class=EventSourceResponse)
 async def _arm_health() -> AsyncIterable[ServerSentEvent]:
-    """Push per-motor temperatures, motor status and bus state every 500 ms.
+    """Push per-motor and bus state, and the lifter's height, every 200 ms.
 
-    Sampled rather than pushed on change: the arms report at 250 Hz, and
-    none of this needs to reach an operator sooner than this.
+    Sampled rather than pushed on change: the arms and the lifter report at
+    250 Hz. The rate is the lifter's, so that its height follows a move.
+    The lifter rides along under "lifter" rather than in a stream of its
+    own: the page already holds five, and a sixth would leave no connection
+    for its own requests.
     """
     while state.running:
         now = time.time()
-        snapshot = {}
+        lifter_fresh = (
+            lifter.updated_at and now - lifter.updated_at <= LIFTER_STALE_AFTER_S
+        )
+        snapshot = {
+            "lifter": {
+                "present": LIFTER_OBSERVATION_INPUT in seen_inputs,
+                "elevation_mm": lifter.elevation_mm if lifter_fresh else None,
+                "moving": lifter.moving,
+                "controls": _lifter_controls_enabled(),
+            }
+        }
         for side, health in arm_health.items():
             fresh = health.updated_at and now - health.updated_at <= (
                 ARM_TEMPERATURE_STALE_AFTER_S
@@ -938,7 +1071,7 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
                 else {"state": "UNKNOWN", "count": 0, "severity": "unknown"},
             }
         yield ServerSentEvent(data=snapshot)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
 
 
 @app.websocket("/cameras")
@@ -1103,6 +1236,10 @@ async def _main_dora(server):
                 )
                 _update_arm_health(side, event["value"])
                 continue
+            if event_id == LIFTER_OBSERVATION_INPUT:
+                # 250 Hz: store only; /arm-health samples it.
+                _update_lifter_elevation(event["value"])
+                continue
             if event_id in VR_RECEIVE_TIMES_INPUTS:
                 for ts_ns in event["value"].to_pylist():
                     _update_vr_stats(float(ts_ns) / 1e9)
@@ -1137,6 +1274,7 @@ async def _main_async():
 
     task_uvicorn = asyncio.create_task(_main_uvicorn(server))
     task_dora = asyncio.create_task(_main_dora(server))
+    task_lifter = asyncio.create_task(_lifter_watchdog())
 
     await task_uvicorn
     # Process may linger when dora exits via SIGTERM,
@@ -1145,6 +1283,7 @@ async def _main_async():
     # so that _main_dora() also exits.
     state.running = False
     await task_dora
+    await task_lifter
 
 
 def main():
