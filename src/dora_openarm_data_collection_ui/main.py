@@ -103,9 +103,9 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
-    # task_description split into start / done / reset, or None when it
-    # doesn't follow that pattern.
-    task_steps: dict | None = None
+    # task_description split at its headings (see split_description), one
+    # row each in the left panel; empty when it has no headings.
+    task_sections: list = dataclasses.field(default_factory=list)
     # Videos of the task done right (tasks[].reference_video, or every video
     # in the task's numbered folder): URLs, or paths that /reference-video
     # serves. Several are tiled. Display only.
@@ -542,7 +542,7 @@ def apply_task(index):
     state.task_title = task.get("prompt_ja") or task.get("prompt", "")
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
-    state.task_steps = split_description(state.task_description)
+    state.task_sections = split_description(state.task_description)
     video = str(task.get("reference_video") or "").strip()
     found = reference_video_files(index)
     if _is_url(video):
@@ -561,37 +561,65 @@ def apply_task(index):
 # Folded YAML joins Japanese lines with a space: drop spaces between
 # non-ASCII characters.
 _CJK_SPACE = re.compile(r"(?<=[^\x00-\x7f]) +(?=[^\x00-\x7f])")
-_DESCRIPTION_PATTERNS = (
-    re.compile(
-        r"(?:初期状態[:：]\s*)?(?P<start>.*?)"
-        r"(?:\s*完了状態[:：]\s*(?P<done>.*?))?"
-        r"(?:\s*次の周を始める前に[、,]?\s*(?P<reset>.*))?",
-        re.DOTALL,
-    ),
-    re.compile(
-        r"(?:Initial state:\s*)?(?P<start>.*?)"
-        r"(?:\s*Done when\s+(?P<done>.*?))?"
-        r"(?:\s*(?P<reset>Before repeating.*))?",
-        re.DOTALL,
-    ),
+# Where a description is split: 【注意】 style headings, and the older
+# 「初期状態: … 完了状態: … 次の周を始める前に、…」 and English
+# "Initial state: … Done when … Before repeating …" markers. "Before
+# repeating" is a lookahead, so it stays in the section's text.
+_DESCRIPTION_HEADING = re.compile(
+    r"【(?P<bracket>[^】]+)】"
+    r"|(?P<marker>初期状態|完了状態|Initial state)\s*[:：]"
+    r"|(?P<reset_ja>次の周を始める前に)[、,]?"
+    r"|\b(?P<done_en>Done when)\s+"
+    r"|(?=\b(?P<reset_en>Before repeating)\b)"
 )
+# heading -> (label shown, kind). The kind colours the section: "warn" must
+# not be missed, "setup" is how the scene starts, "done" is when to stop,
+# "reset" is for between rounds. Unlisted 【…】 headings show as they are.
+_DESCRIPTION_KINDS = {
+    "注意": ("注意", "warn"),
+    "スキップ": ("スキップ", "warn"),
+    "準備": ("準備", "setup"),
+    "初期状態": ("開始時", "setup"),
+    "Initial state": ("開始時", "setup"),
+    "完了": ("完了", "done"),
+    "完了状態": ("完了条件", "done"),
+    "Done when": ("完了条件", "done"),
+    "次の周を始める前に": ("次の周の前に", "reset"),
+    "Before repeating": ("次の周の前に", "reset"),
+}
 
 
 def split_description(text):
-    """Split a task description into start / done / reset texts.
+    """Split a task description at its headings, one section per heading.
 
-    Returns None when the description has none of the markers, so the
-    caller shows it as one paragraph.
+    Returns [{"heading", "text", "kind"}], or [] when the description has
+    no headings, so the caller shows it as one paragraph. Text before the
+    first heading is a section without a heading, except in the older
+    marker style, where it is the initial state.
     """
-    text = _CJK_SPACE.sub("", text.strip())
-    for pattern in _DESCRIPTION_PATTERNS:
-        match = pattern.fullmatch(text)
-        steps = {k: v for k, v in match.groupdict().items() if v}
-        if steps.get("done") or steps.get("reset") or match.start("start") > 0:
-            if "done" in steps:
-                steps["done"] = steps["done"][0].upper() + steps["done"][1:]
-            return steps
-    return None
+    text = _CJK_SPACE.sub("", " ".join(str(text or "").split()))
+    sections = []
+    heading, start = None, 0
+    for match in _DESCRIPTION_HEADING.finditer(text):
+        body = text[start : match.start()].strip()
+        if heading or body:
+            sections.append((heading, body))
+        heading = next(v for v in match.groupdict().values() if v)
+        start = match.end()
+    if not sections and heading is None:
+        return []
+    body = text[start:].strip()
+    if heading or body:
+        sections.append((heading, body))
+    if sections and sections[0][0] is None and "【" not in text:
+        sections[0] = ("初期状態", sections[0][1])
+    result = []
+    for heading, body in sections:
+        label, kind = _DESCRIPTION_KINDS.get(heading, (heading or "", ""))
+        if heading == "Done when" and body:
+            body = body[0].upper() + body[1:]
+        result.append({"heading": label, "text": body, "kind": kind})
+    return result
 
 
 def _mtime(path):
