@@ -208,6 +208,46 @@
       .bus-badge.warn { color: var(--warn); }
       .bus-badge.error { color: var(--bad); }
 
+      /* --- リフター -------------------------------------------------- */
+
+      /* One line at the right end of the camera tabs (or of the key bar
+         when there is no camera view). */
+      .lifter-panel {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .bar .lifter-panel { margin-right: auto; margin-left: 0; }
+      .lifter-panel[hidden], .lifter-panel [hidden] { display: none; }
+      .lifter-panel .label { margin: 0; }
+      .lifter-height { font-size: 18px; font-weight: bold; white-space: nowrap; }
+      .lifter-height.stale { color: #555; }
+      .lifter-buttons { display: flex; gap: 6px; }
+      .lifter-btn {
+        min-width: 88px;
+        padding: 4px 12px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+        /* Held down, not clicked: no scrolling, selecting or long-press
+           menu on a touch screen. */
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
+      }
+      .lifter-btn:hover:not(:disabled) { border-color: var(--muted); }
+      .lifter-btn.active {
+        border-color: var(--accent);
+        color: var(--accent);
+        background: rgba(76, 195, 217, 0.12);
+      }
+      .lifter-btn:disabled { color: #555; cursor: not-allowed; }
+      .lifter-hint { font-size: 12px; color: var(--muted); }
+
       /* --- 右側: キー操作とカメラ ------------------------------------ */
 
       .right { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -273,7 +313,7 @@
           "hl hl hl hr hr hr" 4fr
           "ce ce wl wl wr wr" 3fr / 1fr 1fr 1fr 1fr 1fr 1fr;
       }
-      .camera-view-head { grid-area: bar; display: flex; }
+      .camera-view-head { grid-area: bar; display: flex; align-items: center; gap: 8px; }
       .camera-tabs { display: flex; gap: 4px; }
       .camera-tab {
         background: transparent;
@@ -525,8 +565,29 @@
         </section>
       </aside>
 
+      {# The lifter sits at the right end of the camera tabs, away from the
+         left panel, whose error messages keep moving things around. Shown
+         once the lifter has reported its height (Cell only). -#}
+      {% macro lifter_panel() -%}
+        <div class="lifter-panel" id="lifter-panel"{% if not lifter_present %} hidden{% endif %}>
+          <span class="lifter-hint"{% if not lifter_controls %} hidden{% endif %}>
+            {{- "収録中は動かせません" if state.collecting else "押している間だけ動きます" -}}
+          </span>
+          <span class="label">リフター</span>
+          <span class="lifter-height mono stale"><span id="lifter-elevation">--</span> mm</span>
+          {# KER leader only (see LIFTER_COMMANDS in main.py). -#}
+          <span class="lifter-buttons"{% if not lifter_controls %} hidden{% endif %}>
+            {% for direction, label in [("up", "▲ 上げる"), ("down", "▼ 下げる")] -%}
+              <button type="button" class="lifter-btn" data-lifter="{{ direction }}"
+                      {%- if state.collecting %} disabled{% endif %}>{{ label }}</button>
+            {% endfor -%}
+          </span>
+        </div>
+      {%- endmacro %}
+
       <main class="right">
         <div class="bar">
+          {% if not camera_view_enabled %}{{ lifter_panel() }}{% endif -%}
           {% if state.collecting -%}
             <form class="key go" id="finish-form" action="{{ url_for("_success") }}" method="post">
               <kbd>C</kbd><input type="submit" value="成功で終了">
@@ -581,6 +642,7 @@
               </button>
               {% endfor -%}
             </div>
+            {{ lifter_panel() }}
           </div>
           {% for cam, label in [
             ("camera_head_left", "頭部（左）"),
@@ -1232,9 +1294,72 @@
           ARM_FPS_ERROR, ARM_JITTER_WARN_MS, ARM_JITTER_ERROR_MS);
       };
 
+      // Lifter: moves only while a button is held. The press is repeated
+      // every LIFTER_KEEPALIVE_MS; the node stops the lifter by itself
+      // once the repeats stop (LIFTER_HOLD_TIMEOUT_S), should the release
+      // never reach it.
+      const LIFTER_KEEPALIVE_MS = 200;
+      let lifterDirection = null;
+      let lifterTimer = null;
+
+      const sendLifter = (direction) =>
+        fetch(`/lifter/${direction}`, { method: "POST", keepalive: true }).catch(() => {});
+
+      const lifterStart = (button) => {
+        if (lifterDirection || button.disabled) return;
+        lifterDirection = button.dataset.lifter;
+        button.classList.add("active");
+        sendLifter(lifterDirection);
+        lifterTimer = setInterval(() => sendLifter(lifterDirection), LIFTER_KEEPALIVE_MS);
+      };
+
+      const lifterStop = () => {
+        if (!lifterDirection) return;
+        lifterDirection = null;
+        clearInterval(lifterTimer);
+        lifterTimer = null;
+        for (const b of document.querySelectorAll(".lifter-btn.active")) b.classList.remove("active");
+        sendLifter("stop");
+      };
+
+      for (const button of document.querySelectorAll("[data-lifter]")) {
+        button.addEventListener("pointerdown", (e) => {
+          if (e.button !== 0) return;
+          // Captured, so letting go anywhere stops it, not only on the button.
+          button.setPointerCapture(e.pointerId);
+          lifterStart(button);
+        });
+        button.addEventListener("pointerup", lifterStop);
+        button.addEventListener("pointercancel", lifterStop);
+        button.addEventListener("lostpointercapture", lifterStop);
+        button.addEventListener("contextmenu", (e) => e.preventDefault());
+      }
+      // Anything that takes the page away from the operator ends the move,
+      // the reload after every state change included.
+      window.addEventListener("blur", lifterStop);
+      window.addEventListener("pagehide", lifterStop);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) lifterStop();
+      });
+
+      const showLifter = (s) => {
+        document.getElementById("lifter-panel").hidden = !s?.present;
+        if (!s?.present) return;
+        // Buttons under a KER leader only; VR moves it with its stick.
+        const panel = document.getElementById("lifter-panel");
+        panel.querySelector(".lifter-buttons").hidden = !s.controls;
+        panel.querySelector(".lifter-hint").hidden = !s.controls;
+        if (!s.controls) lifterStop();
+        const known = s.elevation_mm != null;
+        document.getElementById("lifter-elevation").textContent =
+          known ? s.elevation_mm.toFixed(1) : "--";
+        document.querySelector(".lifter-height").classList.toggle("stale", !known);
+      };
+
       const armHealthSource = new EventSource("/arm-health");
       armHealthSource.onmessage = (e) => {
-        const health = JSON.parse(e.data);
+        const { lifter, ...health } = JSON.parse(e.data);
+        showLifter(lifter);
         const anyPresent = Object.values(health).some((s) => s.present);
         document.getElementById("arm-health-panel").hidden = !anyPresent;
         for (const [side, s] of Object.entries(health)) {
