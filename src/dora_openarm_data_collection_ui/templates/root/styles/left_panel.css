@@ -104,7 +104,7 @@
 .stat-row.stale .cam-jitter,
 .stat-row.stale .cam-latency { color: var(--stale); }
 .device-name { color: var(--muted); font-size: 11px; margin-left: 6px; }
-/* Motors: one line per arm -- bus, hottest motor, motors in trouble. */
+/* Motors: one line per arm -- bus and hottest motor -- then a row per motor. */
 .arm-line {
   display: grid;
   grid-template-columns: 1fr auto 72px;
@@ -115,10 +115,25 @@
 .arm-line .hottest { text-align: right; }
 /* State rate: stands in for the CAN loop's timing. */
 .arm-rate { font-size: 12px; color: var(--ok); }
-.arm-line .faults { grid-column: 1 / -1; font-size: 12px; font-weight: bold; }
-.arm-line .faults:empty { display: none; }
-.arm-line .faults .fault { color: var(--bad); }
-.arm-line .faults .silent { color: #f90; }
+/* A row per motor, J1..J7 then the gripper. */
+.arm-line .temp-head,
+.arm-line .temp-rows { grid-column: 1 / -1; }
+.arm-line .temp-head,
+.arm-line .temp-row {
+  display: grid;
+  grid-template-columns: 44px 52px 52px 1fr;
+  gap: 6px;
+  font-size: 12px;
+}
+.arm-line .temp-head { font-size: 10px; color: #666; }
+.arm-line .temp-row .joint { color: var(--muted); }
+.arm-line .temp-row .mos,
+.arm-line .temp-row .rotor { font-variant-numeric: tabular-nums; }
+/* DISABLED is torque off, not a fault, so only error codes are red. */
+.arm-line .mstatus { color: #666; }
+.arm-line .mstatus.enabled { color: var(--ok); }
+.arm-line .mstatus.fault { color: var(--bad); font-weight: bold; }
+.arm-line .mstatus.silent { color: #f90; font-weight: bold; }
 /* Bus state is a property of the whole interface: one badge per arm,
    showing only the heaviest condition. */
 .bus-badge { font-size: 12px; color: var(--muted); }
