@@ -3,7 +3,7 @@
    when the robot has a lifter (see _lifter_present in main.py). -#}
 {% macro lifter_panel() -%}
   <div class="lifter-panel" id="lifter-panel"{% if not lifter_present %} hidden{% endif %}>
-    <span class="lifter-hint"{% if not lifter_controls %} hidden{% endif %}>
+    <span class="lifter-hint note"{% if not lifter_controls %} hidden{% endif %}>
       {{- "収録中は動かせません" if state.collecting else "押している間だけ動きます" -}}
     </span>
     <span class="label">リフター</span>
@@ -11,7 +11,7 @@
     {# KER leader only (see LIFTER_COMMANDS in main.py). -#}
     <span class="lifter-buttons"{% if not lifter_controls %} hidden{% endif %}>
       {% for direction, label in [("up", "▲ 上げる"), ("down", "▼ 下げる")] -%}
-        <button type="button" class="lifter-btn" data-lifter="{{ direction }}"
+        <button type="button" class="btn lifter-btn" data-lifter="{{ direction }}"
                 {%- if state.collecting %} disabled{% endif %}>{{ label }}</button>
       {% endfor -%}
     </span>

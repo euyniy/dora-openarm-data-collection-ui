@@ -10,6 +10,8 @@
   --warn: #db3;
   --bad: #e44;
   --accent: #4cc3d9;
+  --stale: #555;
+  --dim: #bbb;
   color-scheme: dark;
 }
 
@@ -47,5 +49,15 @@ button, input { font: inherit; color: inherit; }
   text-decoration: none;
   cursor: pointer;
 }
-.btn:hover { border-color: var(--muted); }
+.btn:hover:not(:disabled) { border-color: var(--muted); }
+
+/* Small grey notes. */
+.note { font-size: 12px; color: var(--muted); }
+
+/* A value coloured by its level: the scripts add ok, warn, error or
+   stale next to `tone`. */
+.tone.ok { color: var(--ok); }
+.tone.warn { color: var(--warn); }
+.tone.error { color: var(--bad); }
+.tone.stale { color: var(--stale); }
 

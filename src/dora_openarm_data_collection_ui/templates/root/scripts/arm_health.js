@@ -1,7 +1,7 @@
 const TEMP_OK_MAX = 40;    // up to here green
 const TEMP_WARM_MAX = 70;  // up to here yellow, above it red
 const tempClass = (c) =>
-  c <= TEMP_OK_MAX ? "ok" : c <= TEMP_WARM_MAX ? "warm" : "hot";
+  c <= TEMP_OK_MAX ? "ok" : c <= TEMP_WARM_MAX ? "warn" : "error";
 // DISABLED is torque off, not a fault; only the motor's own error
 // codes and a motor that stopped answering are worth a colour.
 const NORMAL_MOTOR_STATUS = ["ENABLED", "DISABLED"];
@@ -79,9 +79,9 @@ armHealthSource.onmessage = (e) => {
       if (!hottest || t > hottest.t) hottest = { joint: jointLabel(i, count), t };
     }
     const hot = line.querySelector(".hottest");
-    hot.classList.remove("ok", "warm", "hot", "unknown");
+    hot.classList.remove("ok", "warn", "error", "stale");
     hot.textContent = hottest ? `${hottest.joint} ${hottest.t}°C` : "--";
-    hot.classList.add(hottest ? tempClass(hottest.t) : "unknown");
+    hot.classList.add(hottest ? tempClass(hottest.t) : "stale");
     setAlert(`arm:${side}:temp`,
       hottest && hottest.t > TEMP_WARM_MAX ? "error" : null,
       hottest ? `${arm} ${hottest.joint}: ${hottest.t}°C` : "");

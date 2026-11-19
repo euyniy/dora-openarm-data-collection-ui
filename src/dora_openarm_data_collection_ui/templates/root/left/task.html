@@ -16,7 +16,7 @@
     <div class="task-description">{{ state.task_description }}</div>
   {% endif -%}
   {% if state.task_prompt and state.task_prompt != state.task_title -%}
-    <div class="task-prompt">{{ state.task_prompt }}</div>
+    <div class="note">{{ state.task_prompt }}</div>
   {% endif -%}
   {% if state.task_reference_videos -%}
     <div class="task-reference">
@@ -29,6 +29,6 @@
       </div>
     </div>
   {% elif state.task_reference_missing -%}
-    <div class="task-reference-missing">参考動画なし: {{ state.task_reference_missing }}</div>
+    <div class="note">参考動画なし: {{ state.task_reference_missing }}</div>
   {% endif -%}
 </section>

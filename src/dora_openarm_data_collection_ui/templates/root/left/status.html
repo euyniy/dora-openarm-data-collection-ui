@@ -7,7 +7,7 @@
   <div class="row">
     <div>
       <div class="label">エピソード</div>
-      <div class="episode mono">{{ state.episode_number }}<a class="error-mark" id="error-mark" href="#error-panel" title="エラーを見る"{% if not state.errors %} hidden{% endif %}>⚠</a></div>
+      <div class="episode mono">{{ state.episode_number }}<a class="error-mark tone" id="error-mark" href="#error-panel" title="エラーを見る"{% if not state.errors %} hidden{% endif %}>⚠</a></div>
     </div>
     {% if state.collecting -%}
       <div class="status collecting">● 収録中</div>
@@ -15,7 +15,7 @@
       <div class="status idle">待機中</div>
     {% endif -%}
   </div>
-  <div class="arms">
+  <div class="note">
     アーム
     左 <span class="arm-state {{ state.arm_status_left }}">{{ ARM_STATUS_JA.get(state.arm_status_left, state.arm_status_left) }}</span>
     ·
