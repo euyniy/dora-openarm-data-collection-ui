@@ -1,0 +1,24 @@
+{% set ARM_STATUS_JA = {
+      "stopped": "停止中",
+      "started": "起動済み（未同期）",
+      "aligned": "同期済み"
+    } %}
+<section class="sec">
+  <div class="row">
+    <div>
+      <div class="label">エピソード</div>
+      <div class="episode mono">{{ state.episode_number }}<a class="error-mark tone" id="error-mark" href="#error-panel" title="エラーを見る"{% if not state.errors %} hidden{% endif %}>⚠</a></div>
+    </div>
+    {% if state.collecting -%}
+      <div class="status collecting">● 収録中</div>
+    {% else -%}
+      <div class="status idle">待機中</div>
+    {% endif -%}
+  </div>
+  <div class="note">
+    アーム
+    左 <span class="arm-state {{ state.arm_status_left }}">{{ ARM_STATUS_JA.get(state.arm_status_left, state.arm_status_left) }}</span>
+    ·
+    右 <span class="arm-state {{ state.arm_status_right }}">{{ ARM_STATUS_JA.get(state.arm_status_right, state.arm_status_right) }}</span>
+  </div>
+</section>

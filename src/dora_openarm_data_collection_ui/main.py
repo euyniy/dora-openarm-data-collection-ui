@@ -19,19 +19,29 @@ import asyncio
 import collections
 from contextlib import asynccontextmanager
 import dataclasses
+import itertools
 import datetime
 import dora
 import json
 from collections.abc import AsyncIterable
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
 import os
 import pathlib
 import pyarrow as pa
+import re
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uvicorn
 import yaml
@@ -51,6 +61,16 @@ launcher_url = "http://127.0.0.1:8080/"
 
 # Operation manual shown on the task screen (see --manual-file).
 manual = None
+
+# Where the reference videos of the tasks are (see --reference-video-dir):
+# <dir>/<task set>/<task number from 1>/<any name>.mp4, or the file that
+# tasks[].reference_video names.
+DEFAULT_REFERENCE_VIDEO_DIR = pathlib.Path("metadatas/task-reference")
+reference_video_dir = DEFAULT_REFERENCE_VIDEO_DIR
+REFERENCE_VIDEO_SUFFIXES = (".mp4", ".m4v", ".webm", ".mov")
+# The id of the task set being recorded: the metadata's task_set, or the
+# metadata file's name.
+task_set = ""
 
 
 # Browser openers, most specific first. "open" is macOS, "xdg-open" is Linux.
@@ -90,6 +110,16 @@ class State:
     # task_title shows the Japanese tasks[].prompt_ja.
     task_prompt: str = ""
     task_description: str = ""
+    # task_description split at its headings (see split_description), one
+    # row each in the left panel; empty when it has no headings.
+    task_sections: list = dataclasses.field(default_factory=list)
+    # Videos of the task done right (tasks[].reference_video, or every video
+    # in the task's numbered folder): URLs, or paths that /reference-video
+    # serves. Several are tiled. Display only.
+    task_reference_videos: list = dataclasses.field(default_factory=list)
+    # The reference video named by the task but not found: shown as a quiet
+    # note, since recording works without it (the NAS may be unmounted).
+    task_reference_missing: str = ""
     arm_status_right: str = "stopped"
     arm_status_left: str = "stopped"
     # Failures to show in red on the task screen: newest last.
@@ -139,19 +169,22 @@ CAMERA_INPUTS = (
 CAMERA_TIMESTAMP_WINDOW = 60
 CAMERA_STALE_AFTER_S = 1.0
 
-# Cameras shown live to the operator. The ceiling is always shown; below it
-# the operator picks one pair with a tab. Only the ceiling and the picked
-# pair are sent, since every camera shown costs browser CPU on the same PC
-# that records.
-CAMERA_VIEW_ALWAYS = ("camera_ceiling",)
-CAMERA_VIEW_GROUPS = {
-    "head": ("camera_head_left", "camera_head_right"),
-    "wrist": ("camera_wrist_left", "camera_wrist_right"),
+# Cameras shown live to the operator, by view: one head camera, the head
+# with both wrists, or all five. Only the picked view's cameras are sent,
+# since every camera shown costs browser CPU on the same PC that records.
+CAMERA_VIEWS = {
+    "head": ("camera_head_left",),
+    "wrists": ("camera_head_left", "camera_wrist_left", "camera_wrist_right"),
+    "all": (
+        "camera_head_left",
+        "camera_head_right",
+        "camera_ceiling",
+        "camera_wrist_left",
+        "camera_wrist_right",
+    ),
 }
-CAMERA_VIEW_DEFAULT_GROUP = "head"
-CAMERA_VIEW_INPUTS = CAMERA_VIEW_ALWAYS + tuple(
-    name for group in CAMERA_VIEW_GROUPS.values() for name in group
-)
+CAMERA_VIEW_DEFAULT = "head"
+CAMERA_VIEW_INPUTS = CAMERA_VIEWS["all"]
 
 # The live view is a preview, so it is sent at a fraction of the camera rate
 # (see --camera-view-fps). 0 turns it off.
@@ -213,6 +246,54 @@ VR_RECEIVE_TIMES_INPUTS = ("vr_receive_times", "vr_recv_ts")
 VR_TIMESTAMP_WINDOW = 120  # ~1.6 s of history at 72 Hz
 VR_STALE_AFTER_S = 1.0
 
+# The Cell lifter (dora-openarm-cell-lifter). Its `elevation_observation` is
+# the height in mm, sent on every tick once it has calibrated. The panel
+# shows from the start when the metadata's equipment has a lifter (the
+# Cell), else once a height has arrived. `lifter_command` drives it like its joystick:
+# "lifter-up" / "lifter-down" move it until "lifter-stop".
+#
+# The buttons are for a KER leader only. A VR or WebXR leader moves the
+# lifter with its left stick, which it sends with every packet, so a resting
+# stick would cancel a move from the page at once.
+LIFTER_OBSERVATION_INPUT = "elevation_observation"
+LIFTER_COMMANDS = {"up": "lifter-up", "down": "lifter-down", "stop": "lifter-stop"}
+LIFTER_STALE_AFTER_S = 1.0
+# The page repeats up/down every 200 ms while a button is held. Should those
+# stop arriving (the browser closed or lost the connection mid-press), the
+# lifter is stopped here instead of running on to the end of its stroke.
+LIFTER_HOLD_TIMEOUT_S = 0.6
+LIFTER_WATCHDOG_INTERVAL_S = 0.05
+
+
+@dataclasses.dataclass
+class Lifter:
+    """The lifter's last height and the move the task screen holds, if any."""
+
+    elevation_mm: float | None = None
+    updated_at: float = 0.0
+    # "up" or "down" while a button is held, else None.
+    moving: str | None = None
+    hold_until: float = 0.0
+
+
+lifter = Lifter()
+# From the metadata (launcher/task_metadata.py compose()): whether the robot
+# has a lifter, and the leader.
+lifter_equipped = False
+leader = None
+# Routes run in worker threads while the watchdog runs on the event loop.
+_lifter_lock = threading.Lock()
+
+
+def _lifter_present():
+    """Whether the task screen shows the lifter panel."""
+    return lifter_equipped or LIFTER_OBSERVATION_INPUT in seen_inputs
+
+
+def _lifter_controls_enabled():
+    """Whether the page may move the lifter: only under a KER leader."""
+    return leader == "ker" or KER_POSITION_INPUT in seen_inputs
+
 
 @dataclasses.dataclass
 class StreamStats:
@@ -229,6 +310,22 @@ camera_timestamps: dict[str, collections.deque] = {
 
 vr_stats = StreamStats()
 vr_timestamps: collections.deque = collections.deque(maxlen=VR_TIMESTAMP_WINDOW)
+
+# How late each frame arrives: receipt time minus its dora timestamp, in ms.
+# That is the transport and queue delay, not the camera's own capture delay.
+camera_latency_ms: dict[str, collections.deque] = {
+    name: collections.deque(maxlen=CAMERA_TIMESTAMP_WINDOW) for name in CAMERA_INPUTS
+}
+
+# Arrival times of each arm's state. Its rate and jitter stand in for the CAN
+# loop's timing, which nothing measures directly. Computed per snapshot, not
+# per message, since the state arrives at 250 Hz.
+ARM_STATE_TIMESTAMP_WINDOW = 250
+ARM_STATE_STALE_AFTER_S = 1.0
+arm_state_timestamps: dict[str, collections.deque] = {
+    side: collections.deque(maxlen=ARM_STATE_TIMESTAMP_WINDOW)
+    for side in ARM_STATE_INPUTS.values()
+}
 
 ker_stats = StreamStats()
 ker_timestamps: collections.deque = collections.deque(maxlen=KER_TIMESTAMP_WINDOW)
@@ -315,6 +412,28 @@ def _fold_arrival(series, stats, ts_s: float, stale_after_s: float) -> None:
     diffs = [series[i] - series[i - 1] for i in range(1, len(series))]
     stats.fps = (len(series) - 1) / span
     stats.jitter_ms = (max(diffs) - min(diffs)) * 1e3
+
+
+def _series_rate(series, now: float, stale_after_s: float) -> tuple[float, float]:
+    """Return (Hz, jitter in ms) of arrival times, or (0, 0) when stale."""
+    if len(series) < 2 or now - series[-1] > stale_after_s:
+        return 0.0, 0.0
+    span = series[-1] - series[0]
+    if span <= 0:
+        return 0.0, 0.0
+    shortest = longest = series[1] - series[0]
+    for previous, current in zip(series, itertools.islice(series, 1, None), strict=False):
+        gap = current - previous
+        shortest = min(shortest, gap)
+        longest = max(longest, gap)
+    return (len(series) - 1) / span, (longest - shortest) * 1e3
+
+
+def _add_arrival(series, ts_s: float, stale_after_s: float) -> None:
+    """Append an arrival time, restarting the window after a stall."""
+    if series and ts_s - series[-1] > stale_after_s:
+        series.clear()
+    series.append(ts_s)
 
 
 def _update_camera_stats(event_id: str, ts_s: float) -> None:
@@ -478,6 +597,124 @@ def apply_task(index):
     state.task_title = task.get("prompt_ja") or task.get("prompt", "")
     state.task_prompt = task.get("prompt", "")
     state.task_description = task.get("description_ja") or task.get("description", "")
+    state.task_sections = split_description(state.task_description)
+    video = str(task.get("reference_video") or "").strip()
+    found = reference_video_files(index)
+    if _is_url(video):
+        state.task_reference_videos = [video]
+    else:
+        # The URL differs per file, so the browser never plays a cached video
+        # of another task set (or an older file) at the same index.
+        state.task_reference_videos = [
+            f"/reference-video/{index}/{number}?v="
+            + urllib.parse.quote(f"{task_set}/{path.name}/{_mtime(path)}")
+            for number, path in enumerate(found)
+        ]
+    state.task_reference_missing = video if video and not _is_url(video) and not found else ""
+
+
+# Folded YAML joins Japanese lines with a space: drop spaces between
+# non-ASCII characters.
+_CJK_SPACE = re.compile(r"(?<=[^\x00-\x7f]) +(?=[^\x00-\x7f])")
+# Where a description is split: 【注意】 style headings, and the older
+# 「初期状態: … 完了状態: … 次の周を始める前に、…」 and English
+# "Initial state: … Done when … Before repeating …" markers. "Before
+# repeating" is a lookahead, so it stays in the section's text.
+_DESCRIPTION_HEADING = re.compile(
+    r"【(?P<bracket>[^】]+)】"
+    r"|(?P<marker>初期状態|完了状態|Initial state)\s*[:：]"
+    r"|(?P<reset_ja>次の周を始める前に)[、,]?"
+    r"|\b(?P<done_en>Done when)\s+"
+    r"|(?=\b(?P<reset_en>Before repeating)\b)"
+)
+# heading -> (label shown, kind). The kind colours the section: "warn" must
+# not be missed, "setup" is how the scene starts, "done" is when to stop,
+# "reset" is for between rounds. Unlisted 【…】 headings show as they are.
+_DESCRIPTION_KINDS = {
+    "注意": ("注意", "warn"),
+    "スキップ": ("スキップ", "warn"),
+    "準備": ("準備", "setup"),
+    "初期状態": ("開始時", "setup"),
+    "Initial state": ("開始時", "setup"),
+    "完了": ("完了", "done"),
+    "完了状態": ("完了条件", "done"),
+    "Done when": ("完了条件", "done"),
+    "次の周を始める前に": ("次の周の前に", "reset"),
+    "Before repeating": ("次の周の前に", "reset"),
+}
+
+
+def split_description(text):
+    """Split a task description at its headings, one section per heading.
+
+    Returns [{"heading", "text", "kind"}], or [] when the description has
+    no headings, so the caller shows it as one paragraph. Text before the
+    first heading is a section without a heading, except in the older
+    marker style, where it is the initial state.
+    """
+    text = _CJK_SPACE.sub("", " ".join(str(text or "").split()))
+    sections = []
+    heading, start = None, 0
+    for match in _DESCRIPTION_HEADING.finditer(text):
+        body = text[start : match.start()].strip()
+        if heading or body:
+            sections.append((heading, body))
+        heading = next(v for v in match.groupdict().values() if v)
+        start = match.end()
+    if not sections and heading is None:
+        return []
+    body = text[start:].strip()
+    if heading or body:
+        sections.append((heading, body))
+    if sections and sections[0][0] is None and "【" not in text:
+        sections[0] = ("初期状態", sections[0][1])
+    result = []
+    for heading, body in sections:
+        label, kind = _DESCRIPTION_KINDS.get(heading, (heading or "", ""))
+        if heading == "Done when" and body:
+            body = body[0].upper() + body[1:]
+        result.append({"heading": label, "text": body, "kind": kind})
+    return result
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _is_url(value):
+    return value.startswith(("http://", "https://"))
+
+
+def reference_video_files(index):
+    """Return the files of the reference videos of the task at `index`.
+
+    A task's `reference_video` is a URL, which the browser plays as is, or a
+    file name in reference_video_dir. Without it, every video file in
+    <reference_video_dir>/<task set>/<index + 1>/ is the task's, in name
+    order, so a folder of numbered folders gives every task of a set its
+    videos. /reference-video serves the files.
+    """
+    video = str(tasks[index].get("reference_video") or "").strip()
+    if _is_url(video):
+        return []
+    if video:
+        path = reference_video_dir / video
+        return [path] if path.is_file() else []
+    folder = reference_video_dir / task_set / str(index + 1)
+    try:
+        files = sorted(folder.iterdir())
+    except OSError:
+        return []
+    return [
+        path
+        for path in files
+        if path.suffix.lower() in REFERENCE_VIDEO_SUFFIXES
+        and not path.name.startswith(".")
+        and path.is_file()
+    ]
 
 
 def next_task():
@@ -490,6 +727,8 @@ def next_task():
 
 def _command_start():
     """Start a new episode."""
+    # The height is set between episodes, never while recording.
+    _stop_lifter_if_moving()
     node.send_output(
         "command",
         pa.array(["start"]),
@@ -561,6 +800,57 @@ def _command_arm_stop():
     node.send_output("arm_command", pa.array(["stop"]))
 
 
+def _command_lifter(direction):
+    """Move the lifter "up" or "down" until "stop" or the hold times out.
+
+    A repeated up/down only extends the hold; the lifter is told again
+    only when the direction changes.
+    """
+    if direction == "stop":
+        # Only a move this page started: a stop otherwise would zero a VR
+        # leader's stick for a moment.
+        _stop_lifter_if_moving()
+        return
+    with _lifter_lock:
+        lifter.hold_until = time.monotonic() + LIFTER_HOLD_TIMEOUT_S
+        if lifter.moving == direction:
+            return
+        lifter.moving = direction
+        node.send_output("lifter_command", pa.array([LIFTER_COMMANDS[direction]]))
+
+
+def _stop_lifter_if_moving(expired_only=False):
+    """Stop a move the task screen started, if one is going.
+
+    With `expired_only`, only once its hold has run out: checked under the
+    lock, so a keep-alive that just arrived is never cut short.
+    """
+    with _lifter_lock:
+        if lifter.moving is None:
+            return
+        if expired_only and time.monotonic() <= lifter.hold_until:
+            return
+        lifter.moving = None
+        node.send_output("lifter_command", pa.array([LIFTER_COMMANDS["stop"]]))
+
+
+def _update_lifter_elevation(value) -> None:
+    """Record the lifter's height (mm) from `elevation_observation`."""
+    try:
+        lifter.elevation_mm = float(value[0].as_py())
+        lifter.updated_at = time.time()
+    except (IndexError, TypeError, ValueError):
+        pass
+
+
+async def _lifter_watchdog():
+    """Stop the lifter when the page holding a button stops saying so."""
+    while state.running:
+        if lifter.moving is not None:
+            _stop_lifter_if_moving(expired_only=True)
+        await asyncio.sleep(LIFTER_WATCHDOG_INTERVAL_S)
+
+
 @app.get("/", response_class=HTMLResponse)
 def _root(request: Request):
     """Render the main HTML."""
@@ -576,8 +866,12 @@ def _root(request: Request):
             # Rendered into the tiles so that the reload after every state
             # change (an arm starting, say) keeps them as they were.
             "camera_view_status": _camera_view_status(),
-            "camera_view_groups": CAMERA_VIEW_GROUPS,
-            "camera_view_default_group": CAMERA_VIEW_DEFAULT_GROUP,
+            "camera_views": CAMERA_VIEWS,
+            "camera_view_default": CAMERA_VIEW_DEFAULT,
+            # Rendered for the same reason: the lifter panel would otherwise
+            # blink out until /arm-health's first snapshot.
+            "lifter_present": _lifter_present(),
+            "lifter_controls": _lifter_controls_enabled(),
             "launcher_session_id_json": json.dumps(os.getenv("LAUNCHER_SESSION_ID") or ""),
         },
     )
@@ -637,6 +931,34 @@ def _cancel(request: Request):
     return RedirectResponse(request.url_for("_root"), 303)
 
 
+@app.post("/lifter/{direction}")
+def _lifter(direction: str):
+    """Move the lifter while a button is held: up / down, repeated, then stop.
+
+    Refused while recording, so that an episode never has the height
+    change under it, and without a KER leader (see LIFTER_COMMANDS);
+    "stop" is always accepted.
+    """
+    if direction not in LIFTER_COMMANDS:
+        return JSONResponse({"accepted": False, "reason": "unknown"}, status_code=404)
+    if direction != "stop" and not _lifter_controls_enabled():
+        return JSONResponse({"accepted": False, "reason": "not-ker"}, status_code=409)
+    if direction != "stop" and state.collecting:
+        return JSONResponse({"accepted": False, "reason": "collecting"}, status_code=409)
+    _command_lifter(direction)
+    return {"accepted": True}
+
+
+@app.get("/reference-video/{index}/{number}")
+def _reference_video(index: int, number: int):
+    """Serve a reference video file of a task (seekable: Range requests work)."""
+    files = reference_video_files(index) if 0 <= index < len(tasks) else []
+    if not 0 <= number < len(files):
+        return Response(status_code=404)
+    # The same URL can mean another file after the task set changes.
+    return FileResponse(files[number], headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/events", response_class=EventSourceResponse)
 async def _events(request: Request) -> AsyncIterable[ServerSentEvent]:
     try:
@@ -676,9 +998,14 @@ async def _stats() -> AsyncIterable[ServerSentEvent]:
                 continue
             series = camera_timestamps[name]
             if not series or now - series[-1] > CAMERA_STALE_AFTER_S:
-                snapshot[name] = {"fps": 0.0, "jitter_ms": 0.0}
+                snapshot[name] = {"fps": 0.0, "jitter_ms": 0.0, "latency_ms": 0.0}
             else:
-                snapshot[name] = {"fps": s.fps, "jitter_ms": s.jitter_ms}
+                latency = camera_latency_ms[name]
+                snapshot[name] = {
+                    "fps": s.fps,
+                    "jitter_ms": s.jitter_ms,
+                    "latency_ms": sum(latency) / len(latency) if latency else 0.0,
+                }
         yield ServerSentEvent(data=snapshot)
         await asyncio.sleep(0.5)
 
@@ -714,20 +1041,38 @@ async def _ker_stats() -> AsyncIterable[ServerSentEvent]:
 
 @app.get("/arm-health", response_class=EventSourceResponse)
 async def _arm_health() -> AsyncIterable[ServerSentEvent]:
-    """Push per-motor temperatures, motor status and bus state every 500 ms.
+    """Push per-motor and bus state, and the lifter's height, every 200 ms.
 
-    Sampled rather than pushed on change: the arms report at 250 Hz, and
-    none of this needs to reach an operator sooner than this.
+    Sampled rather than pushed on change: the arms and the lifter report at
+    250 Hz. The rate is the lifter's, so that its height follows a move.
+    The lifter rides along under "lifter" rather than in a stream of its
+    own: the page already holds five, and a sixth would leave no connection
+    for its own requests.
     """
     while state.running:
         now = time.time()
-        snapshot = {}
+        lifter_fresh = (
+            lifter.updated_at and now - lifter.updated_at <= LIFTER_STALE_AFTER_S
+        )
+        snapshot = {
+            "lifter": {
+                "present": _lifter_present(),
+                "elevation_mm": lifter.elevation_mm if lifter_fresh else None,
+                "moving": lifter.moving,
+                "controls": _lifter_controls_enabled(),
+            }
+        }
         for side, health in arm_health.items():
             fresh = health.updated_at and now - health.updated_at <= (
                 ARM_TEMPERATURE_STALE_AFTER_S
             )
+            fps, jitter_ms = _series_rate(
+                arm_state_timestamps[side], now, ARM_STATE_STALE_AFTER_S
+            )
             snapshot[side] = {
                 "present": f"arm_state_{side}" in seen_inputs,
+                "fps": fps,
+                "jitter_ms": jitter_ms,
                 "mos": health.mos if fresh else [],
                 "rotor": health.rotor if fresh else [],
                 "motor_status": health.motor_status if fresh else [],
@@ -736,21 +1081,21 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
                 else {"state": "UNKNOWN", "count": 0, "severity": "unknown"},
             }
         yield ServerSentEvent(data=snapshot)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
 
 
 @app.websocket("/cameras")
 async def _cameras(websocket: WebSocket):
     """Push each viewed camera's newest frame and whether it is live.
 
-    `?group=` picks the pair sent besides the ceiling (CAMERA_VIEW_GROUPS);
-    the page reconnects when the operator switches tabs.
+    `?view=` picks the cameras sent (CAMERA_VIEWS); the page reconnects
+    when the operator switches views.
 
     Frames are binary messages: the camera's name, a newline, the JPEG.
     Every CAMERA_VIEW_STATUS_INTERVAL_S a text message carries
-    _camera_view_status() as JSON for every camera, including the pair not
-    shown, so the other tab can warn about a dead camera; it alone decides
-    映像なし.
+    _camera_view_status() as JSON for every camera, including those not
+    shown, so the other views' buttons can warn about a dead camera; it
+    alone decides 映像なし.
 
     One socket carries every camera: the page already holds five SSE
     streams, and one MJPEG stream per camera would exhaust the browser's six
@@ -762,10 +1107,8 @@ async def _cameras(websocket: WebSocket):
     if camera_view_fps <= 0:
         await websocket.close()
         return
-    group = websocket.query_params.get("group", CAMERA_VIEW_DEFAULT_GROUP)
-    names = CAMERA_VIEW_ALWAYS + CAMERA_VIEW_GROUPS.get(
-        group, CAMERA_VIEW_GROUPS[CAMERA_VIEW_DEFAULT_GROUP]
-    )
+    view = websocket.query_params.get("view", CAMERA_VIEW_DEFAULT)
+    names = CAMERA_VIEWS.get(view, CAMERA_VIEWS[CAMERA_VIEW_DEFAULT])
     sent = {name: 0 for name in names}
     status_sent_at = 0.0
     try:
@@ -880,10 +1223,9 @@ async def _main_dora(server):
                 )
                 continue
             if event_id in CAMERA_INPUTS:
-                _update_camera_stats(
-                    event_id,
-                    _event_ts_to_seconds(event["metadata"].get("timestamp")),
-                )
+                ts_s = _event_ts_to_seconds(event["metadata"].get("timestamp"))
+                _update_camera_stats(event_id, ts_s)
+                camera_latency_ms[event_id].append((time.time() - ts_s) * 1e3)
                 _store_camera_frame(event_id, event["value"], event["metadata"])
                 continue
             if event_id in ARM_STATUS_INPUTS:
@@ -896,7 +1238,17 @@ async def _main_dora(server):
             if event_id in ARM_STATE_INPUTS:
                 # Store only. Notifying here would push an SSE frame 250
                 # times a second per arm; /arm-health samples instead.
-                _update_arm_health(ARM_STATE_INPUTS[event_id], event["value"])
+                side = ARM_STATE_INPUTS[event_id]
+                _add_arrival(
+                    arm_state_timestamps[side],
+                    _event_ts_to_seconds(event["metadata"].get("timestamp")),
+                    ARM_STATE_STALE_AFTER_S,
+                )
+                _update_arm_health(side, event["value"])
+                continue
+            if event_id == LIFTER_OBSERVATION_INPUT:
+                # 250 Hz: store only; /arm-health samples it.
+                _update_lifter_elevation(event["value"])
                 continue
             if event_id in VR_RECEIVE_TIMES_INPUTS:
                 for ts_ns in event["value"].to_pylist():
@@ -932,6 +1284,7 @@ async def _main_async():
 
     task_uvicorn = asyncio.create_task(_main_uvicorn(server))
     task_dora = asyncio.create_task(_main_dora(server))
+    task_lifter = asyncio.create_task(_lifter_watchdog())
 
     await task_uvicorn
     # Process may linger when dora exits via SIGTERM,
@@ -940,6 +1293,7 @@ async def _main_async():
     # so that _main_dora() also exits.
     state.running = False
     await task_dora
+    await task_lifter
 
 
 def main():
@@ -974,6 +1328,12 @@ def main():
         help="The operation manual (YAML) shown on the task screen",
         type=pathlib.Path,
     )
+    parser.add_argument(
+        "--reference-video-dir",
+        default=os.getenv("REFERENCE_VIDEO_DIR") or DEFAULT_REFERENCE_VIDEO_DIR,
+        help=f"Where the tasks' reference videos are ({DEFAULT_REFERENCE_VIDEO_DIR})",
+        type=pathlib.Path,
+    )
     default_launcher_url = "http://127.0.0.1:8080/"
     parser.add_argument(
         "--launcher-url",
@@ -997,8 +1357,19 @@ def main():
     launcher_url = args.launcher_url.rstrip("/") + "/"
     global manual
     manual = load_manual(args.manual_file)
+    global reference_video_dir
+    reference_video_dir = args.reference_video_dir.expanduser()
     metadata = load_yaml(args.metadata_file)
+    global task_set
+    task_set = str(metadata.get("task_set") or args.metadata_file.stem)
     tasks = metadata["tasks"]
+    global lifter_equipped, leader
+    try:
+        lifter_equipped = "lifter" in metadata["equipment"]["embodiments"]
+    except (KeyError, TypeError):
+        # A bare task file (no robot equipment) has no lifter.
+        lifter_equipped = False
+    leader = metadata.get("leader")
     apply_task(state.task_index)
 
     node = dora.Node()
