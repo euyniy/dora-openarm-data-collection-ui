@@ -247,8 +247,9 @@ VR_TIMESTAMP_WINDOW = 120  # ~1.6 s of history at 72 Hz
 VR_STALE_AFTER_S = 1.0
 
 # The Cell lifter (dora-openarm-cell-lifter). Its `elevation_observation` is
-# the height in mm, sent on every tick once it has calibrated; the panel
-# appears once one has arrived. `lifter_command` drives it like its joystick:
+# the height in mm, sent on every tick once it has calibrated. The panel
+# shows from the start when the metadata's equipment has a lifter (the
+# Cell), else once a height has arrived. `lifter_command` drives it like its joystick:
 # "lifter-up" / "lifter-down" move it until "lifter-stop".
 #
 # The buttons are for a KER leader only. A VR or WebXR leader moves the
@@ -276,13 +277,22 @@ class Lifter:
 
 
 lifter = Lifter()
+# From the metadata (launcher/task_metadata.py compose()): whether the robot
+# has a lifter, and the leader. Unknown with a bare task file.
+lifter_equipped = False
+leader = None
 # Routes run in worker threads while the watchdog runs on the event loop.
 _lifter_lock = threading.Lock()
 
 
+def _lifter_present():
+    """Whether the task screen shows the lifter panel."""
+    return lifter_equipped or LIFTER_OBSERVATION_INPUT in seen_inputs
+
+
 def _lifter_controls_enabled():
     """Whether the page may move the lifter: only under a KER leader."""
-    return KER_POSITION_INPUT in seen_inputs
+    return leader == "ker" or KER_POSITION_INPUT in seen_inputs
 
 
 @dataclasses.dataclass
@@ -860,7 +870,7 @@ def _root(request: Request):
             "camera_view_default": CAMERA_VIEW_DEFAULT,
             # Rendered for the same reason: the lifter panel would otherwise
             # blink out until /arm-health's first snapshot.
-            "lifter_present": LIFTER_OBSERVATION_INPUT in seen_inputs,
+            "lifter_present": _lifter_present(),
             "lifter_controls": _lifter_controls_enabled(),
             "launcher_session_id_json": json.dumps(os.getenv("LAUNCHER_SESSION_ID") or ""),
         },
@@ -1046,7 +1056,7 @@ async def _arm_health() -> AsyncIterable[ServerSentEvent]:
         )
         snapshot = {
             "lifter": {
-                "present": LIFTER_OBSERVATION_INPUT in seen_inputs,
+                "present": _lifter_present(),
                 "elevation_mm": lifter.elevation_mm if lifter_fresh else None,
                 "moving": lifter.moving,
                 "controls": _lifter_controls_enabled(),
@@ -1353,6 +1363,10 @@ def main():
     global task_set
     task_set = str(metadata.get("task_set") or args.metadata_file.stem)
     tasks = metadata["tasks"]
+    global lifter_equipped, leader
+    embodiments = (metadata.get("equipment") or {}).get("embodiments") or {}
+    lifter_equipped = "lifter" in embodiments
+    leader = metadata.get("leader")
     apply_task(state.task_index)
 
     node = dora.Node()
