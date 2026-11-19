@@ -85,13 +85,33 @@ armHealthSource.onmessage = (e) => {
     setAlert(`arm:${side}:temp`,
       hottest && hottest.t > TEMP_WARM_MAX ? "error" : null,
       hottest ? `${arm} ${hottest.joint}: ${hottest.t}°C` : "");
-    const faultsEl = line.querySelector(".faults");
-    faultsEl.replaceChildren(...faults.map((f) => {
-      const span = document.createElement("span");
-      span.className = f.status === "SILENT" ? "silent" : "fault";
-      span.textContent = `${f.joint} ${f.status} `;
-      return span;
-    }));
+    const rows = line.querySelector(".temp-rows");
+    if (rows.children.length !== count) {
+      rows.replaceChildren(...Array.from({ length: count }, (_, i) => {
+        const row = document.createElement("div");
+        row.className = "temp-row mono";
+        row.innerHTML = '<span class="joint"></span><span class="mos tone"></span>' +
+          '<span class="rotor tone"></span><span class="mstatus"></span>';
+        row.querySelector(".joint").textContent = jointLabel(i, count);
+        return row;
+      }));
+    }
+    [...rows.children].forEach((row, i) => {
+      const status = s.motor_status?.[i];
+      // A silent motor keeps its last reading in the driver: a stale value.
+      for (const [cls, t] of [["mos", s.mos?.[i]], ["rotor", s.rotor?.[i]]]) {
+        const cell = row.querySelector("." + cls);
+        const known = t != null && status !== "SILENT";
+        cell.classList.remove("ok", "warn", "error", "stale");
+        cell.classList.add(known ? tempClass(t) : "stale");
+        cell.textContent = known ? t + "°C" : "--";
+      }
+      const st = row.querySelector(".mstatus");
+      st.className = "mstatus" + (status === "SILENT" ? " silent"
+        : status === "ENABLED" ? " enabled"
+        : status && !NORMAL_MOTOR_STATUS.includes(status) ? " fault" : "");
+      st.textContent = status ?? "--";
+    });
     setAlert(`arm:${side}:faults`, faults.length ? "error" : null,
       `${arm} ` + faults.map((f) => `${f.joint} ${f.status}`).join(", "));
   }
