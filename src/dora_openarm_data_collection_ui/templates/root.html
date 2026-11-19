@@ -81,6 +81,9 @@
       .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
       .episode { font-size: 22px; font-weight: bold; }
+      /* Points to the errors section, which sits below the task. */
+      .error-mark { color: var(--bad); font-size: 16px; text-decoration: none; margin-left: 4px; }
+      .error-mark.warn { color: var(--warn); }
       .status { font-weight: bold; letter-spacing: 0.1em; }
       .status.idle { color: var(--ok); }
       .status.collecting { color: var(--bad); }
@@ -436,7 +439,7 @@
           <div class="row">
             <div>
               <div class="label">エピソード</div>
-              <div class="episode mono">{{ state.episode_number }}</div>
+              <div class="episode mono">{{ state.episode_number }}<a class="error-mark" id="error-mark" href="#error-panel" title="エラーを見る"{% if not state.errors %} hidden{% endif %}>⚠</a></div>
             </div>
             {% if state.collecting -%}
               <div class="status collecting">● 収録中</div>
@@ -450,31 +453,6 @@
             ·
             右 <span class="arm-state {{ state.arm_status_right }}">{{ ARM_STATUS_JA.get(state.arm_status_right, state.arm_status_right) }}</span>
           </div>
-        </section>
-
-        <section class="sec errors" id="error-panel"{% if not state.errors %} hidden{% endif %}>
-          <div class="title">⚠ {{ "エラーが発生しています" if state.errors else "確認してください" }}</div>
-          <!-- Live threshold warnings from the health streams, by key. -->
-          <ul class="error-list" id="live-alerts"></ul>
-          {% if state.errors -%}
-            <div class="hint">
-              収録を続ける前に内容を確認してください。解消しない場合は、下の内容を担当者に伝えてください。
-            </div>
-            <ul class="error-list">
-              {% for error in state.errors | reverse -%}
-                <li>
-                  <span class="meta mono">[{{ error.time }}] {{ error.source }}{% if error.count > 1 %} ×{{ error.count }}{% endif %}</span>
-                  {{ error.message }}
-                </li>
-              {% endfor -%}
-            </ul>
-            <div class="error-actions">
-              <form action="{{ url_for("_clear_errors") }}" method="post">
-                <input class="btn" type="submit" value="エラー表示を消す">
-              </form>
-              <a class="btn" href="{{ launcher_url }}log" target="_blank">詳しいログを見る</a>
-            </div>
-          {% endif -%}
         </section>
 
         <section class="sec">
@@ -509,6 +487,33 @@
             </div>
           {% elif state.task_reference_missing -%}
             <div class="task-reference-missing">参考動画なし: {{ state.task_reference_missing }}</div>
+          {% endif -%}
+        </section>
+
+        {# Below the task so that errors coming and going don't move the
+           task and its reference video; the mark by the episode shows them. -#}
+        <section class="sec errors" id="error-panel"{% if not state.errors %} hidden{% endif %}>
+          <div class="title">⚠ {{ "エラーが発生しています" if state.errors else "確認してください" }}</div>
+          <!-- Live threshold warnings from the health streams, by key. -->
+          <ul class="error-list" id="live-alerts"></ul>
+          {% if state.errors -%}
+            <div class="hint">
+              収録を続ける前に内容を確認してください。解消しない場合は、下の内容を担当者に伝えてください。
+            </div>
+            <ul class="error-list">
+              {% for error in state.errors | reverse -%}
+                <li>
+                  <span class="meta mono">[{{ error.time }}] {{ error.source }}{% if error.count > 1 %} ×{{ error.count }}{% endif %}</span>
+                  {{ error.message }}
+                </li>
+              {% endfor -%}
+            </ul>
+            <div class="error-actions">
+              <form action="{{ url_for("_clear_errors") }}" method="post">
+                <input class="btn" type="submit" value="エラー表示を消す">
+              </form>
+              <a class="btn" href="{{ launcher_url }}log" target="_blank">詳しいログを見る</a>
+            </div>
           {% endif -%}
         </section>
 
@@ -993,8 +998,12 @@
             return li;
           })
         );
-        document.getElementById("error-panel").hidden =
-          !hasServerErrors && liveAlerts.size === 0;
+        const empty = !hasServerErrors && liveAlerts.size === 0;
+        document.getElementById("error-panel").hidden = empty;
+        const mark = document.getElementById("error-mark");
+        mark.hidden = empty;
+        mark.classList.toggle("warn",
+          !hasServerErrors && items.every((a) => a.level !== "error"));
       };
       // level null clears the key.
       const setAlert = (key, level, text) => {
