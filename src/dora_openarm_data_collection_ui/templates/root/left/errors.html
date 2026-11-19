@@ -1,0 +1,26 @@
+        {# Below the task so that errors coming and going don't move the
+           task and its reference video; the mark by the episode shows them. -#}
+        <section class="sec errors" id="error-panel"{% if not state.errors %} hidden{% endif %}>
+          <div class="title">⚠ {{ "エラーが発生しています" if state.errors else "確認してください" }}</div>
+          <!-- Live threshold warnings from the health streams, by key. -->
+          <ul class="error-list" id="live-alerts"></ul>
+          {% if state.errors -%}
+            <div class="hint">
+              収録を続ける前に内容を確認してください。解消しない場合は、下の内容を担当者に伝えてください。
+            </div>
+            <ul class="error-list">
+              {% for error in state.errors | reverse -%}
+                <li>
+                  <span class="meta mono">[{{ error.time }}] {{ error.source }}{% if error.count > 1 %} ×{{ error.count }}{% endif %}</span>
+                  {{ error.message }}
+                </li>
+              {% endfor -%}
+            </ul>
+            <div class="error-actions">
+              <form action="{{ url_for("_clear_errors") }}" method="post">
+                <input class="btn" type="submit" value="エラー表示を消す">
+              </form>
+              <a class="btn" href="{{ launcher_url }}log" target="_blank">詳しいログを見る</a>
+            </div>
+          {% endif -%}
+        </section>
