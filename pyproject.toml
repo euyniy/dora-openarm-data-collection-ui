@@ -52,6 +52,10 @@ where = ["src"]
 [tool.setuptools.package-data]
 "dora_openarm_data_collection_ui.templates" = [
     "*.html",
+    "root/*.html",
+    "root/*/*.html",
+    "root/styles/*.css",
+    "root/scripts/*.js",
 ]
 
 [tool.ruff.lint]

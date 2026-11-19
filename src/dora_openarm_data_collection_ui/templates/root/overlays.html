@@ -1,0 +1,18 @@
+<div id="cooldown-toast" class="cooldown-toast">収録開始から間もないため、少し待ってから押してください</div>
+<div class="overlay" id="connection-lost">
+  <div class="title">⚠ データ収集が停止しました</div>
+  <div class="hint">
+    画面とデータ収集プログラムの接続が切れました。異常終了した可能性があります。<br>
+    起動画面に戻って内容を確認してください。
+  </div>
+  <a class="btn" href="{{ launcher_url }}">起動画面に戻る</a>
+</div>
+<div class="overlay" id="ending-panel">
+  <div class="title">終了しています…</div>
+  <div class="hint" id="ending-hint">
+    収録データを保存してから、メニューに戻ります。しばらくお待ちください。
+  </div>
+  <div id="ending-actions" hidden>
+    <a class="btn" href="{{ launcher_url }}">ランチャーの状態を確認</a>
+  </div>
+</div>

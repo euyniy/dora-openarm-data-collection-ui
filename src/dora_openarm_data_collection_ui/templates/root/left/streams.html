@@ -1,0 +1,48 @@
+<section class="sec">
+  <div class="camera-stats" id="camera-panel" hidden>
+    <div class="camera-stats-title">カメラ映像</div>
+    {% for cam, label in [
+      ("camera_wrist_right", "手首（右）"),
+      ("camera_wrist_left", "手首（左）"),
+      ("camera_head_left", "頭部（左）"),
+      ("camera_head_right", "頭部（右）"),
+      ("camera_ceiling", "天井"),
+    ] -%}
+    <div class="stat-row stale" data-cam="{{ cam }}">
+      <span class="cam-name">{{ label }}</span>
+      <span class="cam-fps mono">-- Hz</span>
+      <span class="cam-jitter mono">Δ -- ms</span>
+      <span class="cam-latency mono">遅延 --</span>
+    </div>
+    {% endfor -%}
+  </div>
+  <div class="camera-stats" id="ker-panel" hidden>
+    <div class="camera-stats-title">
+      リーダー（KER）<span class="device-name"></span>
+    </div>
+    <div class="stat-row stale" data-ker="ker_rx">
+      <span class="cam-name">KER</span>
+      <span class="cam-fps mono">-- Hz</span>
+      <span class="cam-jitter mono">&Delta; -- ms</span>
+    </div>
+  </div>
+  <div class="camera-stats" id="vr-panel" hidden>
+    <div class="camera-stats-title">VR ストリーム（UDP）</div>
+    <div class="stat-row stale" data-vr="vr_rx">
+      <span class="cam-name">VR</span>
+      <span class="cam-fps mono">-- Hz</span>
+      <span class="cam-jitter mono">Δ -- ms</span>
+    </div>
+  </div>
+  <div class="camera-stats arm-temps" id="arm-health-panel" hidden>
+    <div class="camera-stats-title">モーター・CAN バス</div>
+    {% for side in ["left", "right"] -%}
+    <div class="arm-line" data-arm="{{ side }}">
+      <span class="cam-name">{{ "左" if side == "left" else "右" }} <span class="arm-rate mono">-- Hz</span></span>
+      <span class="bus-badge mono">BUS --</span>
+      <span class="hottest mono unknown">--</span>
+      <span class="faults"></span>
+    </div>
+    {% endfor -%}
+  </div>
+</section>
