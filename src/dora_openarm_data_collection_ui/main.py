@@ -278,7 +278,7 @@ class Lifter:
 
 lifter = Lifter()
 # From the metadata (launcher/task_metadata.py compose()): whether the robot
-# has a lifter, and the leader. Unknown with a bare task file.
+# has a lifter, and the leader.
 lifter_equipped = False
 leader = None
 # Routes run in worker threads while the watchdog runs on the event loop.
@@ -1364,8 +1364,11 @@ def main():
     task_set = str(metadata.get("task_set") or args.metadata_file.stem)
     tasks = metadata["tasks"]
     global lifter_equipped, leader
-    embodiments = (metadata.get("equipment") or {}).get("embodiments") or {}
-    lifter_equipped = "lifter" in embodiments
+    try:
+        lifter_equipped = "lifter" in metadata["equipment"]["embodiments"]
+    except (KeyError, TypeError):
+        # A bare task file (no robot equipment) has no lifter.
+        lifter_equipped = False
     leader = metadata.get("leader")
     apply_task(state.task_index)
 
